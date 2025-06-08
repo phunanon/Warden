@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
   previewFeatures = ["typedSql"]
 }
 
@@ -16,13 +16,13 @@ model Rule {
 }
 
 model Message {
-  id         Int      @id @default(autoincrement())
-  at         DateTime @default(now())
-  guildSf    BigInt
-  channelSf  BigInt
-  messageSf  BigInt
-  authorSf   BigInt
-  content    String
+  id        Int      @id @default(autoincrement())
+  at        DateTime @default(now())
+  guildSf   BigInt
+  channelSf BigInt
+  messageSf BigInt
+  authorSf  BigInt
+  content   String
 }
 
 model Incident {
@@ -56,12 +56,13 @@ model GroupIntervention {
 }
 
 model VictimIntervention {
-  id         Int       @id @default(autoincrement())
-  at         DateTime  @default(now())
+  id         Int      @id @default(autoincrement())
+  at         DateTime @default(now())
   incidentId Int
   rule       String
   victimSf   BigInt
-  pardonedAt DateTime?
+  victimTag  String
+  victimUrl  String
 
   incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
   Pardon   Pardon[]

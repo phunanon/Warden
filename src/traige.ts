@@ -49,19 +49,50 @@ ${rules.map(rule => `- ${rule}`).join('\n')}.
 The very last message to come in has been flagged by an automatic system for these suspected issues:
 ${categories}
 
-You are to determine if user ${offenderSf} is violating any of these rules.
-You are also to determine if the message is directed at a specific user (a victim).`,
+Determine if user ${offenderSf} is violating any of these rules.
+Also determine if the message is directed specifically at someone else (a victim).`,
         },
         { role: 'user', content: context },
       ],
     };
     const ruleBreakResponse = await ai(openai, schema, settings);
 
-    if (
-      ruleBreakResponse.victim !== 'everybody' ||
-      !ruleBreakResponse.brokenRule
-    ) {
+    if (!ruleBreakResponse.brokenRule) {
       return ruleBreakResponse;
+    }
+
+    if (ruleBreakResponse.victim !== 'everybody') {
+      const victimSchema = z.object({
+        'your thoughts': z.string(),
+        'still truly the victim?': z.boolean(),
+      });
+      const victimSettings: Settings = {
+        response_format: zodResponseFormat(victimSchema, 'victimCheck'),
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `${preamble}
+
+Another moderator decided there is a particular victim: ${ruleBreakResponse.victim}
+
+Play devil's advocate and briefly explain if the last message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
+There are other people in the chat reading the conversation.`,
+          },
+          { role: 'user', content: context },
+        ],
+      };
+      const victimResponse = await ai(openai, victimSchema, victimSettings);
+      if (victimResponse['still truly the victim?']) {
+        return {
+          ...ruleBreakResponse,
+          reason:
+            ruleBreakResponse.reason +
+            "\nVictim-check devil's advocate said: " +
+            victimResponse['your thoughts'],
+        };
+      }
+      console.log('Ignoring victim:', victimResponse['your thoughts']);
     }
 
     const devilSchema = z.object({
@@ -79,7 +110,7 @@ You are also to determine if the message is directed at a specific user (a victi
 Another moderator has flagged a message for breaking this rule:
 ${ruleBreakResponse.brokenRule}
 
-Play devil's advocate and explain if the last message by ${offenderSf}, in context, is actually alright.
+Play devil's advocate and briefly explain if the last message by ${offenderSf}, in context, is actually alright.
 Especially in protection of free-speech, and the right to express oneself.`,
         },
         { role: 'user', content: context },
