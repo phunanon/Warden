@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./db.db"
+}
+
+model Rule {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  guildSf   BigInt
+  rule      String
+}
+
+model Incident {
+  id         Int      @id @default(autoincrement())
+  at         DateTime @default(now())
+  guildSf    BigInt
+  channelSf  BigInt
+  offenderSf BigInt
+  messageSf  BigInt
+  msgContent String
+  categories String
+  context    String
+  resolution String?
+
+  groupInterventions  GroupIntervention[]
+  victimInterventions VictimIntervention[]
+  probations          Probation[]
+  pardons             Pardon[]
+}
+
+model GroupIntervention {
+  id         Int      @id @default(autoincrement())
+  at         DateTime @default(now())
+  incidentId Int
+  rule       String
+  msgDeleted Boolean
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+}
+
+model VictimIntervention {
+  id         Int       @id @default(autoincrement())
+  at         DateTime  @default(now())
+  incidentId Int
+  rule       String
+  victimSf   BigInt
+  pardonedAt DateTime?
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  Pardon   Pardon[]
+}
+
+model Pardon {
+  id             Int      @id @default(autoincrement())
+  at             DateTime @default(now())
+  incidentId     Int
+  interventionId Int
+
+  incident     Incident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  intervention VictimIntervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+}
+
+model Probation {
+  id                 Int      @id @default(autoincrement())
+  at                 DateTime @default(now())
+  originalIncidentId Int
+  expiresAt          DateTime
+  startInformed      Boolean  @default(false)
+  expiryInformed     Boolean  @default(false)
+
+  originalIncident Incident     @relation(fields: [originalIncidentId], references: [id], onDelete: Cascade)
+  Punishment       Punishment[]
+}
+
+model Punishment {
+  id          Int      @id @default(autoincrement())
+  at          DateTime @default(now())
+  probationId Int
+  until       DateTime
+  timedOut    Boolean
+  banned      Boolean
+
+  probation Probation @relation(fields: [probationId], references: [id], onDelete: Cascade)
+  Parole    Parole[]
+}
+
+model Parole {
+  id           Int      @id @default(autoincrement())
+  at           DateTime @default(now())
+  punishmentId Int
+  expiresAt    DateTime
+
+  punishment Punishment @relation(fields: [punishmentId], references: [id], onDelete: Cascade)
+}
