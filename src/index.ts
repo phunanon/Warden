@@ -6,15 +6,16 @@ import { deleteOldMessages } from '@prisma/client/sql';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
 import { ButtonStyle, ComponentType, Client } from 'discord.js';
 import { DetectIncident } from './spotter';
-import * as Triage from './traige';
+import * as Triage from './triage';
 
-//TODO: parole
+//FIXME: people can offend the bot
 
 type Ctx = { apiKey: string };
 
 const dutyCycleMs = 15_000;
 const probationMs = 60 * 60_000;
-const timeoutMs = 60 * 60_000;
+const pardonMs = 24 * 60 * 60_000;
+const muteMs = 60 * 60_000;
 let dutyCycleTimer: NodeJS.Timeout | undefined;
 
 export const prisma = new PrismaClient();
@@ -28,8 +29,10 @@ export const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel, Partials.Message],
-  closeTimeout: 6_000,
 });
+
+const truncate = (str: string, maxLength: number) =>
+  str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
 
 async function MatchPriorIncident(
   incident: Incident,
@@ -54,13 +57,13 @@ async function MatchPriorIncident(
   console.log(
     `Incident ${incident.id} is a repeat of prior incident ${prior.id}.`,
   );
-  const until = new Date(Date.now() + timeoutMs);
+  const until = new Date(Date.now() + muteMs);
   await prisma.incident.update({
     where: { id: incident.id },
     data: {
       resolution: 'Repeat incident',
       punishments: {
-        create: { probationId: probation.id, until, timeOut: true, ban: false },
+        create: { probationId: probation.id, until, mute: true, ban: false },
       },
     },
   });
@@ -90,10 +93,11 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
   if ('victimId' in result) {
     const { victimId, rule, reason } = result;
     console.log(reason);
-    const { guildSf, offenderSf, } = incident;
+    const { guildSf, offenderSf } = incident;
+    const pardonsSince = new Date(Date.now() - pardonMs);
     const pardons = await prisma.pardon
       .findMany({
-        where: { incident: { guildSf, offenderSf } },
+        where: { incident: { guildSf, offenderSf }, at: { gt: pardonsSince } },
         include: { intervention: { select: { victimSf: true } } },
       })
       .then(p => p.map(p => p.intervention.victimSf));
@@ -146,7 +150,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     const components = [
       {
         ...{ customId: `pardon-${offenderSf}`, label: 'I forgive them' },
-        ...{ type: ComponentType.Button, style: ButtonStyle.Primary },
+        ...{ type: ComponentType.Button, style: ButtonStyle.Success },
       },
       {
         ...{ customId: `prosecute-${offenderSf}`, label: 'I dislike it' },
@@ -201,7 +205,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       try {
         await offender.timeout(60_000, reason);
       } catch (err) {
-        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
+        console.error(`Failed to mute offender ${offender.user.id}:`, err);
       }
     }
     const expiresAt = new Date(Date.now() + probationMs);
@@ -276,7 +280,7 @@ async function ProcessProbations() {
         embeds: [
           {
             title: 'You broke a rule!',
-            description: `If you do it again before <t:${t}> you will be timed out.`,
+            description: `If you do it again before <t:${t}> you will be muted.`,
             color: 0xffff00,
             fields: [
               { name: 'You sent', value: `> ${incident.msgContent}` },
@@ -305,7 +309,6 @@ async function ProcessProbations() {
       console.warn(`No intervention found for probation ${probation.id}.`);
       continue;
     }
-    const { rule } = intervention;
     const offender = await client.users.fetch(`${incident.offenderSf}`);
     if (!offender) {
       console.warn(`Offender ${incident.offenderSf} not found.`);
@@ -316,7 +319,7 @@ async function ProcessProbations() {
         embeds: [
           {
             title: 'Thank you',
-            description: 'You are forgiven for the incident earlier.',
+            description: 'You are forgiven for the earlier incident.',
             color: 0x00ff00,
             footer: { text: `Incident #${incident.id}` },
           },
@@ -346,7 +349,7 @@ async function ProcessPunishments() {
     `Found ${unexecutedPunishments.length} unexecuted punishment(s).`,
   );
   for (const punishment of unexecutedPunishments) {
-    const { probation, timeOut, ban, until } = punishment;
+    const { probation, mute, ban, until } = punishment;
     const { originalIncident: incident } = probation;
     const { guildSf, offenderSf, resolution } = incident;
     const guild = await client.guilds.fetch(`${guildSf}`);
@@ -360,12 +363,12 @@ async function ProcessPunishments() {
       return;
     }
     try {
-      const timeOutStr = timeOut ? 'timed out' : '';
+      const muteStr = mute ? 'muted' : '';
       const banStr = ban ? 'banned' : '';
       await offender.send({
         embeds: [
           {
-            title: `You've been ${timeOutStr}${banStr}!`,
+            title: `You've been ${muteStr}${banStr}!`,
             description: `I told you if you if you broke the same rule again this would happen.
 You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
             color: 0xff0000,
@@ -376,12 +379,12 @@ You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
     } catch (err) {
       console.error(`Failed to notify offender ${offender.user.id}:`, err);
     }
-    if (timeOut) {
+    if (mute) {
       try {
-        await offender.timeout(timeoutMs, 'Punishment timeout');
-        console.log(`Timed out offender ${offender.user.id}`);
+        await offender.timeout(muteMs, 'Punishment');
+        console.log(`Muted offender ${offender.user.id}`);
       } catch (err) {
-        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
+        console.error(`Failed to mute offender ${offender.user.id}:`, err);
       }
     }
     if (ban) {
@@ -416,24 +419,27 @@ client.once('ready', () => {
 
   client.on('messageCreate', async message => {
     if (!message.guildId || message.author.bot) return;
-    const truncatedContent =
-      message.content.slice(0, 1000) +
-      (message.content.length > 1000 ? '... ' : ' ');
     const [guildSf, channelSf, messageSf, authorSf] = [
       BigInt(message.guildId),
       BigInt(message.channelId),
       BigInt(message.id),
       BigInt(message.author.id),
     ];
+    const repliedTo = message.reference?.messageId
+      ? await message.channel.messages
+          .fetch(message.reference.messageId)
+          .then(m => m.content)
+      : undefined;
+    const content =
+      truncate(message.content, 512) +
+      (repliedTo ? ` (in reply to ${truncate(repliedTo, 50)})` : '');
     await prisma.message.create({
-      data: {
-        ...{ guildSf, channelSf, messageSf, authorSf },
-        content: truncatedContent,
-      },
+      data: { guildSf, channelSf, messageSf, authorSf, content },
     });
     await prisma.$queryRawTyped(deleteOldMessages());
     const incidentCategories = await DetectIncident(OPENAI_API_KEY, message);
     if (!incidentCategories) return;
+    console.log('Incident:', message.content);
     await message.react('🚨');
     const context = await prisma.message
       .findMany({ where: { guildSf, channelSf }, orderBy: { at: 'asc' } })
@@ -441,13 +447,13 @@ client.once('ready', () => {
         messages.map(m => `${m.authorSf}: ${m.content}`).join('\n'),
       );
     const attachments = message.attachments.map(a => a.url).join(' ');
-    const msgContent = truncatedContent + attachments;
+    const msgContent = content + attachments;
     const incident = await prisma.incident.create({
       data: {
         ...{ guildSf, channelSf, messageSf },
         offenderSf: authorSf,
         msgContent,
-        context: context,
+        context,
         categories: incidentCategories,
       },
     });
@@ -487,8 +493,9 @@ client.once('ready', () => {
           interventionId: victimIntervention.id,
         },
       });
+      const hours = Math.floor(pardonMs / (60 * 60_000));
       await interaction.editReply(`You have pardoned <@${offenderSf}>.
-For 24h I will ignore incidents against you by them.`);
+For ${hours}h I will ignore incidents against you by them.`);
       await interaction.message.delete();
     }
     if (isProsecute) {
@@ -498,8 +505,9 @@ For 24h I will ignore incidents against you by them.`);
           expiresAt: new Date(Date.now() + probationMs),
         },
       });
-      await interaction.editReply(`You have prosecuted the offender.
-Any incidents against you by them in the next 24 hours will be ignored.`);
+      await interaction.editReply(
+        'Their behaviour will now be closely watched, thank you.',
+      );
       await interaction.message.delete();
     }
   });

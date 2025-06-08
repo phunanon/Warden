@@ -21,10 +21,8 @@ The goal is to replace human moderators almost entirely.
   - if their probation ends without incident, they are informed
   - messages in breach of the rule will be deleted as necessary
 - **punishment**:
-  - a timeout configured per rule
+  - a mute configured per rule
   - (ideally, if there is a low rate of false-positives then bans can be issued)
-- **parole**:
-  - once their timeout expires, they are under probation (but called parole) again
 
 ## Hosting
 

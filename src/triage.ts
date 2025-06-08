@@ -50,7 +50,8 @@ The very last message to come in has been flagged by an automatic system for the
 ${categories}
 
 Determine if user ${offenderSf} is violating any of these rules.
-Also determine if the message is directed specifically at someone else (a victim).`,
+Also determine if the message is directed specifically at someone else (a victim).
+Briefly explain your reasoning.`,
         },
         { role: 'user', content: context },
       ],
@@ -59,6 +60,15 @@ Also determine if the message is directed specifically at someone else (a victim
 
     if (!ruleBreakResponse.brokenRule) {
       return ruleBreakResponse;
+    }
+
+    if (ruleBreakResponse.victim === `${offenderSf}`) {
+      return {
+        brokenRule: null,
+        reason: 'Victim is the offender.',
+        victim: 'everybody',
+        'Should the message be deleted immediately?': false,
+      };
     }
 
     if (ruleBreakResponse.victim !== 'everybody') {

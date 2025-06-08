@@ -9,5 +9,5 @@ WITH ranked AS (
 )
 DELETE FROM Message
 WHERE id IN (
-  SELECT id FROM ranked WHERE rn > 10
+  SELECT id FROM ranked WHERE rn > 16
 );
