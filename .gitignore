@@ -1,5 +1,6 @@
 node_modules/
 out/
 .env
-prisma/
+prisma/*
 !prisma/schema.prisma
+!prisma/sql/

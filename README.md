@@ -17,7 +17,6 @@ The goal is to replace human moderators almost entirely.
   - the offender is put under *probation*
 - **probation**
   - the member would be privately informed that their behaviour is in breach of a specific rule, and they will be monitored for the next X minutes for that rule
-  - every N number of messages all their messages in any channel will be evaluated, with conversation context, unless they trigger dumb detection early
   - if they're found to breach the rule again, a summary will be written and sent to them as to why they will be punished
   - if their probation ends without incident, they are informed
   - messages in breach of the rule will be deleted as necessary

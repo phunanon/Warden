@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["typedSql"]
 }
 
 datasource db {
@@ -14,6 +15,16 @@ model Rule {
   rule      String
 }
 
+model Message {
+  id         Int      @id @default(autoincrement())
+  at         DateTime @default(now())
+  guildSf    BigInt
+  channelSf  BigInt
+  messageSf  BigInt
+  authorSf   BigInt
+  content    String
+}
+
 model Incident {
   id         Int      @id @default(autoincrement())
   at         DateTime @default(now())
@@ -25,11 +36,13 @@ model Incident {
   categories String
   context    String
   resolution String?
+  pardoned   Boolean  @default(false)
 
   groupInterventions  GroupIntervention[]
   victimInterventions VictimIntervention[]
-  probations          Probation[]
   pardons             Pardon[]
+  probations          Probation[]
+  punishments         Punishment[]
 }
 
 model GroupIntervention {
@@ -70,22 +83,25 @@ model Probation {
   originalIncidentId Int
   expiresAt          DateTime
   startInformed      Boolean  @default(false)
-  expiryInformed     Boolean  @default(false)
+  endInformed        Boolean  @default(false)
 
   originalIncident Incident     @relation(fields: [originalIncidentId], references: [id], onDelete: Cascade)
   Punishment       Punishment[]
 }
 
 model Punishment {
-  id          Int      @id @default(autoincrement())
-  at          DateTime @default(now())
-  probationId Int
-  until       DateTime
-  timedOut    Boolean
-  banned      Boolean
+  id               Int      @id @default(autoincrement())
+  at               DateTime @default(now())
+  probationId      Int
+  secondIncidentId Int
+  until            DateTime
+  timeOut          Boolean
+  ban              Boolean
+  executed         Boolean  @default(false)
 
-  probation Probation @relation(fields: [probationId], references: [id], onDelete: Cascade)
-  Parole    Parole[]
+  probation      Probation @relation(fields: [probationId], references: [id], onDelete: Cascade)
+  secondIncident Incident  @relation(fields: [secondIncidentId], references: [id], onDelete: Cascade)
+  Parole         Parole[]
 }
 
 model Parole {

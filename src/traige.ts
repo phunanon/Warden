@@ -16,8 +16,8 @@ There are both minors and adult in the chat.`;
 type Settings = ChatCompletionCreateParamsNonStreaming;
 type TriageResult =
   | { ignoreReason: string }
-  | { victimId: string; rule: string }
-  | { delete: boolean; rule: string };
+  | { victimId: string; rule: string; reason: string }
+  | { delete: boolean; rule: string; reason: string };
 
 export const TriageIncident = async (
   apiKey: string,
@@ -25,6 +25,7 @@ export const TriageIncident = async (
 ): Promise<TriageResult> => {
   const openai = new OpenAI({ apiKey });
   const ruleBreak = await (async () => {
+    const { offenderSf, categories, context } = incident;
     const schema = z.object({
       brokenRule: z.enum(rules).nullable(),
       reason: z.string(),
@@ -46,66 +47,74 @@ The Discord server has these rules:
 ${rules.map(rule => `- ${rule}`).join('\n')}.
 
 The very last message to come in has been flagged by an automatic system for these suspected issues:
-${incident.categories}
+${categories}
 
-You are to determine if the user who sent the last message is violating any of these rules.
+You are to determine if user ${offenderSf} is violating any of these rules.
 You are also to determine if the message is directed at a specific user (a victim).`,
         },
-        { role: 'user', content: incident.context },
+        { role: 'user', content: context },
       ],
     };
     const ruleBreakResponse = await ai(openai, schema, settings);
-    if (ruleBreakResponse.brokenRule) {
-      const schema = z.object({
-        'your thoughts': z.string(),
-        'continue with intervention?': z.boolean(),
-      });
-      const settings: Settings = {
-        response_format: zodResponseFormat(schema, 'devilsAdvocate'),
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: `${preamble}
+
+    if (
+      ruleBreakResponse.victim !== 'everybody' ||
+      !ruleBreakResponse.brokenRule
+    ) {
+      return ruleBreakResponse;
+    }
+
+    const devilSchema = z.object({
+      'your thoughts': z.string(),
+      'continue with intervention?': z.boolean(),
+    });
+    const devilSettings: Settings = {
+      response_format: zodResponseFormat(devilSchema, 'devilsAdvocate'),
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `${preamble}
 
 Another moderator has flagged a message for breaking this rule:
 ${ruleBreakResponse.brokenRule}
 
-Play devil's advocate and explain if the message, in context, is actually alright.`,
-          },
-          { role: 'user', content: incident.context },
-        ],
-      };
-      const devilsAdvocateResponse = await ai(openai, schema, settings);
-      if (devilsAdvocateResponse['continue with intervention?']) {
-        return {
-          ...ruleBreakResponse,
-          reason:
-            ruleBreakResponse.reason +
-            "\nDevil's advocate said: " +
-            devilsAdvocateResponse['your thoughts'],
-        };
-      }
+Play devil's advocate and explain if the last message by ${offenderSf}, in context, is actually alright.
+Especially in protection of free-speech, and the right to express oneself.`,
+        },
+        { role: 'user', content: context },
+      ],
+    };
+    const devilsAdvocateResponse = await ai(openai, devilSchema, devilSettings);
+    if (devilsAdvocateResponse['continue with intervention?']) {
       return {
-        brokenRule: null,
+        ...ruleBreakResponse,
         reason:
           ruleBreakResponse.reason +
-          "\nBut then the devil's advocate concluded: " +
+          "\nDevil's advocate said: " +
           devilsAdvocateResponse['your thoughts'],
       };
     }
-    return ruleBreakResponse;
+    return {
+      brokenRule: null,
+      reason:
+        ruleBreakResponse.reason +
+        "\nBut then the devil's advocate concluded: " +
+        devilsAdvocateResponse['your thoughts'],
+    };
   })();
   if (!ruleBreak.brokenRule) {
     return { ignoreReason: ruleBreak.reason };
   }
   if (ruleBreak.victim !== 'everybody') {
-    return { victimId: ruleBreak.victim, rule: ruleBreak.brokenRule };
+    const [victimId, rule] = [ruleBreak.victim, ruleBreak.brokenRule];
+    return { victimId, rule, reason: ruleBreak.reason };
   }
   if (ruleBreak.victim === 'everybody') {
     return {
       delete: ruleBreak['Should the message be deleted immediately?'],
       rule: ruleBreak.brokenRule,
+      reason: ruleBreak.reason,
     };
   }
   throw new Error(`Unexpected triage result: ${JSON.stringify(ruleBreak)}`);
@@ -113,10 +122,10 @@ Play devil's advocate and explain if the message, in context, is actually alrigh
 
 const ai = async <T>(
   openai: OpenAI,
-  format: ZodType<T>,
-  schema: ChatCompletionCreateParamsNonStreaming,
+  schema: ZodType<T>,
+  settings: Settings,
 ) => {
-  const response = await openai.chat.completions.create(schema);
+  const response = await openai.chat.completions.create(settings);
   const [victimChoice] = response.choices;
   if (!victimChoice || !victimChoice.message) {
     throw new Error('No victim response from OpenAI');
@@ -126,5 +135,5 @@ const ai = async <T>(
       `OpenAI refused to answer: ${victimChoice.message.refusal}`,
     );
   }
-  return format.parse(JSON.parse(victimChoice.message.content || '{}'));
+  return schema.parse(JSON.parse(victimChoice.message.content || '{}'));
 };

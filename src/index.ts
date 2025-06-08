@@ -2,15 +2,19 @@ import assert from 'assert';
 import * as dotenv from 'dotenv';
 dotenv.config();
 import { Incident, PrismaClient } from '@prisma/client';
+import { deleteOldMessages } from '@prisma/client/sql';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
 import { Client } from 'discord.js';
 import { DetectIncident } from './spotter';
 import * as Triage from './traige';
 
+//TODO: predicate by guildSf everywhere possible
+
 type Ctx = { apiKey: string };
 
 const dutyCycleMs = 15_000;
 const probationMs = 60 * 60_000;
+const timeoutMs = 60 * 60_000;
 let dutyCycleTimer: NodeJS.Timeout | undefined;
 
 export const prisma = new PrismaClient();
@@ -27,6 +31,41 @@ export const client = new Client({
   closeTimeout: 6_000,
 });
 
+async function HandlePriorIncident(
+  incident: Incident,
+  victimSf?: bigint,
+): Promise<boolean> {
+  const [probation] = await prisma.probation.findMany({
+    where: {
+      originalIncident: {
+        offenderSf: incident.offenderSf,
+        ...(victimSf
+          ? { victimInterventions: { some: { victimSf } } }
+          : { groupInterventions: { some: {} } }),
+      },
+      expiresAt: { gt: new Date() },
+    },
+    include: { originalIncident: true },
+  });
+  if (!probation) return false;
+
+  const prior = probation.originalIncident;
+  console.log(
+    `Incident ${incident.id} is a repeat of prior incident ${prior.id}.`,
+  );
+  const until = new Date(Date.now() + timeoutMs);
+  await prisma.incident.update({
+    where: { id: incident.id },
+    data: {
+      resolution: 'Repeat incident',
+      punishments: {
+        create: { probationId: probation.id, until, timeOut: true, ban: false },
+      },
+    },
+  });
+  return true;
+}
+
 async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
   const result = await Triage.TriageIncident(apiKey, incident);
   const message = await client.channels
@@ -36,17 +75,20 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         ? channel.messages.fetch(`${incident.messageSf}`)
         : undefined,
     );
-  void message?.reactions.resolve('🚨')?.remove();
   if ('ignoreReason' in result) {
     console.log(`Ignoring incident ${incident.id}: ${result.ignoreReason}`);
     await prisma.incident.update({
       where: { id: incident.id },
       data: { resolution: result.ignoreReason },
     });
+    try {
+      await message?.reactions.resolve('🚨')?.remove();
+    } catch {}
     return;
   }
   if ('victimId' in result) {
-    const { victimId, rule } = result;
+    const { victimId, rule, reason } = result;
+    console.log(reason);
     const { offenderSf } = incident;
     const pardons = await prisma.pardon
       .findMany({
@@ -67,10 +109,13 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       );
       await prisma.incident.update({
         where: { id: incident.id },
-        data: { resolution: 'Pardon found for victim' },
+        data: { resolution: 'Pardon found for victim', pardoned: true },
       });
       return;
     }
+
+    if (await HandlePriorIncident(incident, victimSf)) return;
+
     console.log(
       `Intervening in incident ${incident.id} for victim ${victimSf}.`,
     );
@@ -82,8 +127,10 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       },
     });
   } else if ('delete' in result) {
-    const { delete: msgDeleted, rule } = result;
+    const { delete: msgDeleted, rule, reason } = result;
     console.log(`Intervening in incident ${incident.id} for group protection.`);
+    console.log(reason);
+
     const messageStatus = (() => {
       if (!message) return 'not found';
       if (msgDeleted) {
@@ -98,6 +145,9 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     console[messageStatus === 'not found' ? 'warn' : 'log'](
       `Message ${incident.messageSf} in channel ${incident.channelSf} ${messageStatus}.`,
     );
+
+    if (await HandlePriorIncident(incident)) return;
+
     {
       const guild = await client.guilds.fetch(`${incident.guildSf}`);
       if (!guild) {
@@ -113,7 +163,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       try {
         await offender.timeout(60_000, reason);
       } catch (err) {
-        console.error(`Failed to timeout offender ${offender.user.tag}:`, err);
+        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
       }
     }
     const expiresAt = new Date(Date.now() + probationMs);
@@ -148,7 +198,7 @@ async function ProcessIncidents(ctx: Ctx) {
   }
 }
 
-async function ProcessProbations(ctx: Ctx) {
+async function ProcessProbations() {
   const include = {
     originalIncident: {
       include: { victimInterventions: true, groupInterventions: true },
@@ -159,7 +209,7 @@ async function ProcessProbations(ctx: Ctx) {
     include,
   });
   const expiryUninformedProbations = await prisma.probation.findMany({
-    where: { expiresAt: { lt: new Date() }, expiryInformed: false },
+    where: { expiresAt: { lt: new Date() }, endInformed: false },
     include,
   });
   if (!startUninformedProbations.length && !expiryUninformedProbations.length) {
@@ -173,9 +223,7 @@ async function ProcessProbations(ctx: Ctx) {
       ...incident.groupInterventions,
     ];
     if (!intervention) {
-      console.warn(
-        `No intervention found for probation ${probation.id}, skipping notification.`,
-      );
+      console.warn(`No intervention found for probation ${probation.id}.`);
       continue;
     }
     const { rule } = intervention;
@@ -190,13 +238,13 @@ async function ProcessProbations(ctx: Ctx) {
         embeds: [
           {
             title: 'You broke a rule!',
-            description: `Your behaviour will now be monitored until <t:${t}>.
-You will be timed out if you break the same rule again.`,
+            description: `If you break the same rule again before <t:${t}> then you will be timed out.`,
             color: 0xffff00,
             fields: [
               { name: 'Broken rule:', value: rule },
               { name: 'You sent:', value: incident.msgContent },
             ],
+            footer: { text: `Incident #${incident.id}` },
           },
         ],
       });
@@ -204,22 +252,125 @@ You will be timed out if you break the same rule again.`,
         where: { id: probation.id },
         data: { startInformed: true },
       });
-      console.log(`Notified offender ${offender.tag} about probation.`);
+      console.log(`Notified offender ${offender.id} about probation.`);
     } catch (err) {
-      console.error(`Failed to notify offender ${offender.tag}:`, err);
+      console.error(`Failed to notify offender ${offender.id}:`, err);
     }
+  }
+  for (const probation of expiryUninformedProbations) {
+    const { originalIncident: incident } = probation;
+    const [intervention] = [
+      ...incident.victimInterventions,
+      ...incident.groupInterventions,
+    ];
+    if (!intervention) {
+      console.warn(`No intervention found for probation ${probation.id}.`);
+      continue;
+    }
+    const { rule } = intervention;
+    const offender = await client.users.fetch(`${incident.offenderSf}`);
+    if (!offender) {
+      console.warn(`Offender ${incident.offenderSf} not found.`);
+      continue;
+    }
+    try {
+      await offender.send({
+        embeds: [
+          {
+            title: 'Thank you',
+            description: 'You are forgiven for the incident earlier.',
+            color: 0x00ff00,
+            footer: { text: `Incident #${incident.id}` },
+          },
+        ],
+      });
+      await prisma.probation.update({
+        where: { id: probation.id },
+        data: { endInformed: true },
+      });
+      console.log(`Notified offender ${offender.id} about probation end.`);
+    } catch (err) {
+      console.error(`Failed to notify offender ${offender.id}:`, err);
+    }
+  }
+}
+
+async function ProcessPunishments() {
+  const unexecutedPunishments = await prisma.punishment.findMany({
+    where: { executed: false },
+    include: { probation: { include: { originalIncident: true } } },
+  });
+  if (!unexecutedPunishments.length) {
+    console.log('No punishments to process.');
+    return;
+  }
+  console.log(
+    `Found ${unexecutedPunishments.length} unexecuted punishment(s).`,
+  );
+  for (const punishment of unexecutedPunishments) {
+    const { probation, timeOut, ban, until } = punishment;
+    const { originalIncident: incident } = probation;
+    const { guildSf, offenderSf, resolution } = incident;
+    const guild = await client.guilds.fetch(`${guildSf}`);
+    if (!guild) {
+      console.warn(`Guild ${guildSf} not found for punishment.`);
+      return;
+    }
+    const offender = await guild.members.fetch(`${offenderSf}`);
+    if (!offender) {
+      console.warn(`Offender ${offenderSf} not found for punishment.`);
+      return;
+    }
+    try {
+      const timeOutStr = timeOut ? 'timed out' : '';
+      const banStr = ban ? 'banned' : '';
+      await offender.send({
+        embeds: [
+          {
+            title: `You've been ${timeOutStr}${banStr}!`,
+            description: `I told you if you if you broke the same rule again this would happen.
+You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
+            color: 0xff0000,
+            footer: { text: `Incident #${incident.id}` },
+          },
+        ],
+      });
+    } catch (err) {
+      console.error(`Failed to notify offender ${offender.user.id}:`, err);
+    }
+    if (timeOut) {
+      try {
+        await offender.timeout(timeoutMs, 'Punishment timeout');
+        console.log(`Timed out offender ${offender.user.id}`);
+      } catch (err) {
+        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
+      }
+    }
+    if (ban) {
+      try {
+        await offender.ban({ reason: resolution ?? 'Punishment' });
+        console.log(`Banned offender ${offender.user.id}.`);
+      } catch (err) {
+        console.error(`Failed to ban offender ${offender.user.id}:`, err);
+      }
+    }
+    await prisma.punishment.update({
+      where: { id: punishment.id },
+      data: { executed: true },
+    });
   }
 }
 
 const DutyCycle = (ctx: Ctx) => async () => {
   clearTimeout(dutyCycleTimer);
   await ProcessIncidents(ctx);
-  await ProcessProbations(ctx);
+  await ProcessProbations();
+  await ProcessPunishments();
   dutyCycleTimer = setTimeout(DutyCycle(ctx), dutyCycleMs);
 };
 
 client.once('ready', () => {
-  console.log(`Logged in as ${client.user?.tag}`);
+  console.log(`Logged in as ${client.user?.id}`);
   const { OPENAI_API_KEY } = process.env;
   assert(OPENAI_API_KEY, 'OPENAI_API_KEY must be set in environment variables');
   const ctx: Ctx = { apiKey: OPENAI_API_KEY };
@@ -227,38 +378,42 @@ client.once('ready', () => {
 
   client.on('messageCreate', async message => {
     if (!message.guildId || message.author.bot) return;
+    const truncatedContent =
+      message.content.slice(0, 1000) +
+      (message.content.length > 1000 ? '... ' : ' ');
+    const [guildSf, channelSf, messageSf, authorSf] = [
+      BigInt(message.guildId),
+      BigInt(message.channelId),
+      BigInt(message.id),
+      BigInt(message.author.id),
+    ];
+    await prisma.message.create({
+      data: {
+        ...{ guildSf, channelSf, messageSf, authorSf },
+        content: truncatedContent,
+      },
+    });
+    await prisma.$queryRawTyped(deleteOldMessages());
     const incidentCategories = await DetectIncident(OPENAI_API_KEY, message);
     if (!incidentCategories) return;
     await message.react('🚨');
-    const context = await message.channel.messages
-      .fetch({ limit: 10, before: message.id })
+    const context = await prisma.message
+      .findMany({ where: { guildSf, channelSf }, orderBy: { at: 'asc' } })
       .then(messages =>
-        [...messages.values()].toSorted(
-          (a, b) => a.createdTimestamp - b.createdTimestamp,
-        ),
-      )
-      .then(messages =>
-        messages.map(m => `${m.author.id}: ${m.content}`).join('\n'),
+        messages.map(m => `${m.authorSf}: ${m.content}`).join('\n'),
       );
     const attachments = message.attachments.map(a => a.url).join(' ');
-    const msgContent =
-      message.content.slice(0, 1000) +
-      (message.content.length > 1000 ? '... ' : ' ') +
-      attachments;
+    const msgContent = truncatedContent + attachments;
     const incident = await prisma.incident.create({
       data: {
-        guildSf: BigInt(message.guildId),
-        channelSf: BigInt(message.channelId),
-        messageSf: BigInt(message.id),
-        offenderSf: BigInt(message.author.id),
+        ...{ guildSf, channelSf, messageSf },
+        offenderSf: authorSf,
         msgContent,
-        context: context + `\n${message.author.id}: ${message.content}`,
+        context: context,
         categories: incidentCategories,
       },
     });
-    console.log(
-      `Message ${message.id}: ${incidentCategories}: ${incident.id}`,
-    );
+    console.log(`Message ${message.id}: ${incidentCategories}: ${incident.id}`);
     await DutyCycle(ctx)();
   });
 });
