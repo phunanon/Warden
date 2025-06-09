@@ -10,6 +10,7 @@ import * as Triage from './triage';
 import { IncidentLog } from './audit';
 
 //FIXME: people can offend the bot
+//TODO: what about, instead of a timeout, just blindly delete all suspicious messages for the next hour?
 
 type Ctx = { apiKey: string };
 
@@ -210,7 +211,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       }
       const reason = `To read my DM; rule: ${rule.slice(0, 24)}...`;
       try {
-        await offender.timeout(60_000, reason);
+        await offender.timeout(30_000, reason);
       } catch (err) {
         console.error(`Failed to mute offender ${offender.user.id}:`, err);
       }
@@ -474,9 +475,11 @@ client.once('ready', () => {
           } catch {}
         })(message.reference.messageId)
       : undefined;
-    const content =
+    const unsanitised =
       truncate(message.content, 512) +
-      (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '');
+      (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '') +
+      message.attachments.map(a => `[Attachment: ${a.name}]`).join(' ');
+    const content = unsanitised.replace(/\\/g, '\\\\');
     await prisma.message.create({
       data: { guildSf, channelSf, messageSf, authorSf, content },
     });
@@ -506,7 +509,7 @@ client.once('ready', () => {
     });
     IncidentLog(
       incident,
-      `**New incident.** <@${authorSf}>. Flagged for *${incidentCategories}*. `,
+      `**New incident.** <@${authorSf}>. Flagged for *${incidentCategories}*. https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf}`,
       content,
     );
     await DutyCycle(ctx)();
@@ -552,11 +555,16 @@ client.once('ready', () => {
       await interaction.editReply('Incident not found.');
       return;
     }
-    const victimIntervention = incident.victimInterventions.find(
-      v => v.victimSf === userSf,
-    );
+    const victimIntervention = incident.victimInterventions[0];
     if (!victimIntervention) {
-      await interaction.editReply('You are not the victim of this incident.');
+      console.warn(`Incident ${incident.id} has no victim intervention.`);
+      return;
+    }
+    const { victimSf } = victimIntervention;
+    if (userSf !== victimSf) {
+      await interaction.editReply(
+        `You are not the victim of this incident - <@${victimSf}> is.`,
+      );
       return;
     }
     if (isPardon) {

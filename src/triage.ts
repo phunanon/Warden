@@ -10,7 +10,7 @@ const rules: [string, ...string[]] = [
   'No trolling or inciting drama: Keep interactions constructive.',
 ];
 
-const model = 'gpt-4o-mini';
+const model = 'gpt-4.1-nano';
 const preamble = `You are a Discord moderator, able to see the latest messages between Discord users in a channel.
 There are both minors and adult in the chat.`;
 
@@ -26,7 +26,12 @@ export const TriageIncident = async (
 ): Promise<TriageResult> => {
   const openai = new OpenAI({ apiKey });
   const ruleBreak = await (async () => {
-    const { offenderSf, categories, context } = incident;
+    const { offenderSf, categories } = incident;
+    //Repeats the last message so simpler models are less confused
+    const context = `${incident.context}
+
+Latest message by ${offenderSf}:
+${incident.msgContent}`;
     const schema = z.object({
       brokenRule: z.enum(rules).nullable(),
       reason: z.string(),
@@ -47,7 +52,7 @@ export const TriageIncident = async (
 The Discord server has these rules:
 ${rules.map(rule => `- ${rule}`).join('\n')}.
 
-The very last message to come in has been flagged by an automatic system for these suspected issues:
+The latest message by ${offenderSf} has been flagged by an automatic system for these suspected issues:
 ${categories}
 
 Determine if user ${offenderSf} is violating any of these rules.
@@ -87,7 +92,7 @@ In a few sentences or fewer, explain your reasoning.`,
 
 Another moderator decided there is a particular victim: ${ruleBreakResponse.victim}
 
-Play devil's advocate and, in only a couple sentences, explain if the last message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
+Play devil's advocate and, in only a couple sentences, explain if the latest message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
 There are other people in the chat reading the conversation.`,
           },
           { role: 'user', content: context },
@@ -121,7 +126,7 @@ There are other people in the chat reading the conversation.`,
 Another moderator has flagged a message for breaking this rule:
 ${ruleBreakResponse.brokenRule}
 
-Play devil's advocate and, in a few sentences or fewer, explain if the last message by ${offenderSf}, in context, is actually alright.
+Play devil's advocate and, in a few sentences or fewer, explain if the latest message by ${offenderSf}, in context, is actually alright.
 Especially in protection of free-speech, and the right to express oneself.`,
         },
         { role: 'user', content: context },
