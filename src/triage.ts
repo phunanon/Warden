@@ -10,6 +10,7 @@ const rules: [string, ...string[]] = [
   'No trolling or inciting drama: Keep interactions constructive.',
 ];
 
+const model = 'gpt-4o-mini';
 const preamble = `You are a Discord moderator, able to see the latest messages between Discord users in a channel.
 There are both minors and adult in the chat.`;
 
@@ -38,7 +39,7 @@ export const TriageIncident = async (
     });
     const settings: Settings = {
       response_format: zodResponseFormat(schema, 'ruleBreak'),
-      model: 'gpt-4o-mini',
+      model,
       messages: [
         {
           role: 'system',
@@ -51,7 +52,7 @@ ${categories}
 
 Determine if user ${offenderSf} is violating any of these rules.
 Also determine if the message is directed specifically at someone else (a victim).
-Briefly explain your reasoning.`,
+In a few sentences or fewer, explain your reasoning.`,
         },
         { role: 'user', content: context },
       ],
@@ -78,7 +79,7 @@ Briefly explain your reasoning.`,
       });
       const victimSettings: Settings = {
         response_format: zodResponseFormat(victimSchema, 'victimCheck'),
-        model: 'gpt-4o-mini',
+        model,
         messages: [
           {
             role: 'system',
@@ -86,7 +87,7 @@ Briefly explain your reasoning.`,
 
 Another moderator decided there is a particular victim: ${ruleBreakResponse.victim}
 
-Play devil's advocate and briefly explain if the last message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
+Play devil's advocate and, in only a couple sentences, explain if the last message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
 There are other people in the chat reading the conversation.`,
           },
           { role: 'user', content: context },
@@ -111,7 +112,7 @@ There are other people in the chat reading the conversation.`,
     });
     const devilSettings: Settings = {
       response_format: zodResponseFormat(devilSchema, 'devilsAdvocate'),
-      model: 'gpt-4o-mini',
+      model,
       messages: [
         {
           role: 'system',
@@ -120,7 +121,7 @@ There are other people in the chat reading the conversation.`,
 Another moderator has flagged a message for breaking this rule:
 ${ruleBreakResponse.brokenRule}
 
-Play devil's advocate and briefly explain if the last message by ${offenderSf}, in context, is actually alright.
+Play devil's advocate and, in a few sentences or fewer, explain if the last message by ${offenderSf}, in context, is actually alright.
 Especially in protection of free-speech, and the right to express oneself.`,
         },
         { role: 'user', content: context },

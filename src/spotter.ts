@@ -33,7 +33,8 @@ export async function DetectIncident(
 
   const resultCategories = Object.entries(result.categories)
     .filter(([k, v]) => Boolean(v))
-    .map(([k]) => k);
+    .map(([k]) => k)
+    .filter(k => !['self-harm'].includes(k));
 
   if (!resultCategories.length) return false;
   return resultCategories.join(', ');

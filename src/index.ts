@@ -7,12 +7,15 @@ import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
 import { ButtonStyle, ComponentType, Client } from 'discord.js';
 import { DetectIncident } from './spotter';
 import * as Triage from './triage';
+import { IncidentLog } from './audit';
 
 //FIXME: people can offend the bot
 
 type Ctx = { apiKey: string };
 
 const dutyCycleMs = 15_000;
+/** Statute of limitations */
+const limitationMs = 60_000;
 const probationMs = 60 * 60_000;
 const pardonMs = 24 * 60 * 60_000;
 const muteMs = 60 * 60_000;
@@ -41,6 +44,7 @@ async function MatchPriorIncident(
   const [probation] = await prisma.probation.findMany({
     where: {
       originalIncident: {
+        id: { not: incident.id },
         guildSf: incident.guildSf,
         offenderSf: incident.offenderSf,
         ...(victimSf
@@ -54,9 +58,7 @@ async function MatchPriorIncident(
   if (!probation) return false;
 
   const prior = probation.originalIncident;
-  console.log(
-    `Incident ${incident.id} is a repeat of prior incident ${prior.id}.`,
-  );
+  IncidentLog(incident, `**Incident is a repeat of #${prior.id}.**`);
   const until = new Date(Date.now() + muteMs);
   await prisma.incident.update({
     where: { id: incident.id },
@@ -72,15 +74,19 @@ async function MatchPriorIncident(
 
 async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
   const result = await Triage.TriageIncident(apiKey, incident);
-  const message = await client.channels
-    .fetch(`${incident.channelSf}`)
-    .then(channel =>
-      channel?.isTextBased()
-        ? channel.messages.fetch(`${incident.messageSf}`)
-        : undefined,
-    );
+  const message = await (async () => {
+    try {
+      return await client.channels
+        .fetch(`${incident.channelSf}`)
+        .then(channel =>
+          channel?.isTextBased()
+            ? channel.messages.fetch(`${incident.messageSf}`)
+            : undefined,
+        );
+    } catch {}
+  })();
   if ('ignoreReason' in result) {
-    console.log(`Ignoring incident ${incident.id}: ${result.ignoreReason}`);
+    IncidentLog(incident, '**Incident ignored.**', result.ignoreReason);
     await prisma.incident.update({
       where: { id: incident.id },
       data: { resolution: result.ignoreReason },
@@ -92,7 +98,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
   }
   if ('victimId' in result) {
     const { victimId, rule, reason } = result;
-    console.log(reason);
+    IncidentLog(incident, `**Detected victim: <@${victimId}>.**`, reason);
     const { guildSf, offenderSf } = incident;
     const pardonsSince = new Date(Date.now() - pardonMs);
     const pardons = await prisma.pardon
@@ -102,6 +108,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       })
       .then(p => p.map(p => p.intervention.victimSf));
     if (!/^[0-9]+$/.test(victimId)) {
+      IncidentLog(incident, '**AI error.**');
       console.warn(
         `Invalid victim ID format: "${victimId}". Expected a numeric SF.`,
       );
@@ -109,8 +116,9 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     }
     const victimSf = BigInt(victimId);
     if (pardons.includes(victimSf)) {
-      console.log(
-        `Pardon found for offender ${offenderSf} by victim ${victimSf}; ignoring incident ${incident.id}.`,
+      IncidentLog(
+        incident,
+        `**Ignoring incident.** Offender <@${offenderSf}> previously pardoned by victim <@${victimSf}>.`,
       );
       await prisma.incident.update({
         where: { id: incident.id },
@@ -124,9 +132,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
 
     if (await MatchPriorIncident(incident, victimSf)) return;
 
-    console.log(
-      `Intervening in incident ${incident.id} for victim ${victimSf}.`,
-    );
+    IncidentLog(incident, `**Intervening for victim <@${victimSf}>.**`);
     const victim = await (async () => {
       try {
         return await client.users.fetch(`${victimSf}`);
@@ -143,6 +149,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       },
     });
     if (!victim) {
+      IncidentLog(incident, `**Victim not reachable: <@${victimSf}>.**`);
       console.warn(`Victim ${victimSf} not found.`);
       return;
     }
@@ -170,8 +177,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     });
   } else if ('delete' in result) {
     const { delete: msgDeleted, rule, reason } = result;
-    console.log(`Intervening in incident ${incident.id} for group protection.`);
-    console.log(reason);
+    IncidentLog(incident, '**Intervening for group protection.**', reason);
 
     const messageStatus = (() => {
       if (!message) return 'not found';
@@ -184,8 +190,9 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       );
       return 'replied to';
     })();
-    console[messageStatus === 'not found' ? 'warn' : 'log'](
-      `Message ${incident.messageSf} in channel ${incident.channelSf} ${messageStatus}.`,
+    IncidentLog(
+      incident,
+      `https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf} ${messageStatus} `,
     );
 
     if (await MatchPriorIncident(incident)) return;
@@ -201,7 +208,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         console.warn(`Offender ${incident.offenderSf} not found.`);
         return;
       }
-      const reason = `To read my DM; rule: ${rule.slice(0, 10)}...`;
+      const reason = `To read my DM; rule: ${rule.slice(0, 24)}...`;
       try {
         await offender.timeout(60_000, reason);
       } catch (err) {
@@ -223,7 +230,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
 async function ProcessIncidents(ctx: Ctx) {
   const unprocessed = await prisma.incident.findMany({
     where: {
-      at: { gt: new Date(Date.now() - dutyCycleMs) },
+      at: { gt: new Date(Date.now() - limitationMs) },
       resolution: null,
       groupInterventions: { none: {} },
       victimInterventions: { none: {} },
@@ -231,7 +238,9 @@ async function ProcessIncidents(ctx: Ctx) {
     },
   });
   if (unprocessed.length) {
-    console.log(`Found ${unprocessed.length} unprocessed incident(s).`);
+    console.log(
+      `Found unprocessed incidents: #${unprocessed.map(u => u.id).join(', #')}`,
+    );
     for (const incident of unprocessed) {
       await TriageIncident(ctx, incident);
     }
@@ -294,8 +303,12 @@ async function ProcessProbations() {
         where: { id: probation.id },
         data: { startInformed: true },
       });
-      console.log(`Notified offender ${offender.id} about probation.`);
+      IncidentLog(incident, `**Notified <@${offender.id}> of probation.**`);
     } catch (err) {
+      IncidentLog(
+        incident,
+        `**Failed to notify <@${offender.id}> of probation.**`,
+      );
       console.error(`Failed to notify offender ${offender.id}:`, err);
     }
   }
@@ -325,14 +338,21 @@ async function ProcessProbations() {
           },
         ],
       });
-      await prisma.probation.update({
-        where: { id: probation.id },
-        data: { endInformed: true },
-      });
-      console.log(`Notified offender ${offender.id} about probation end.`);
+      IncidentLog(
+        incident,
+        `**Notified offender <@${offender.id}> of probation end.**`,
+      );
     } catch (err) {
+      IncidentLog(
+        incident,
+        `**Failed to notify offender <@${offender.id}> of probation end.**`,
+      );
       console.error(`Failed to notify offender ${offender.id}:`, err);
     }
+    await prisma.probation.update({
+      where: { id: probation.id },
+      data: { endInformed: true },
+    });
   }
 }
 
@@ -382,16 +402,24 @@ You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
     if (mute) {
       try {
         await offender.timeout(muteMs, 'Punishment');
-        console.log(`Muted offender ${offender.user.id}`);
+        IncidentLog(incident, `**Muted offender <@${offender.user.id}>.**`);
       } catch (err) {
+        IncidentLog(
+          incident,
+          `**Failed to mute offender <@${offender.user.id}>.**`,
+        );
         console.error(`Failed to mute offender ${offender.user.id}:`, err);
       }
     }
     if (ban) {
       try {
         await offender.ban({ reason: resolution ?? 'Punishment' });
-        console.log(`Banned offender ${offender.user.id}.`);
+        IncidentLog(incident, `**Banned offender <@${offender.user.id}>.**`);
       } catch (err) {
+        IncidentLog(
+          incident,
+          `**Failed to ban offender <@${offender.user.id}>.**`,
+        );
         console.error(`Failed to ban offender ${offender.user.id}:`, err);
       }
     }
@@ -402,12 +430,19 @@ You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
   }
 }
 
+let dutyCycleSemaphore = false;
 const DutyCycle = (ctx: Ctx) => async () => {
+  if (dutyCycleSemaphore) {
+    console.log('Duty cycle already running, skipping this cycle.');
+    return;
+  }
+  dutyCycleSemaphore = true;
   clearTimeout(dutyCycleTimer);
   await ProcessIncidents(ctx);
   await ProcessProbations();
   await ProcessPunishments();
   dutyCycleTimer = setTimeout(DutyCycle(ctx), dutyCycleMs);
+  dutyCycleSemaphore = false;
 };
 
 client.once('ready', () => {
@@ -416,6 +451,11 @@ client.once('ready', () => {
   assert(OPENAI_API_KEY, 'OPENAI_API_KEY must be set in environment variables');
   const ctx: Ctx = { apiKey: OPENAI_API_KEY };
   void DutyCycle(ctx)();
+
+  void client.application?.commands.create({
+    name: 'audit-here',
+    description: 'Log activity in this channel for auditing',
+  });
 
   client.on('messageCreate', async message => {
     if (!message.guildId || message.author.bot) return;
@@ -426,20 +466,27 @@ client.once('ready', () => {
       BigInt(message.author.id),
     ];
     const repliedTo = message.reference?.messageId
-      ? await message.channel.messages
-          .fetch(message.reference.messageId)
-          .then(m => m.content)
+      ? await (async messageId => {
+          try {
+            return await message.channel.messages
+              .fetch(messageId)
+              .then(m => m.content);
+          } catch {}
+        })(message.reference.messageId)
       : undefined;
     const content =
       truncate(message.content, 512) +
-      (repliedTo ? ` (in reply to ${truncate(repliedTo, 50)})` : '');
+      (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '');
     await prisma.message.create({
       data: { guildSf, channelSf, messageSf, authorSf, content },
     });
     await prisma.$queryRawTyped(deleteOldMessages());
-    const incidentCategories = await DetectIncident(OPENAI_API_KEY, message);
+    const incidentCategories = await (async () => {
+      try {
+        return await DetectIncident(OPENAI_API_KEY, message);
+      } catch {}
+    })();
     if (!incidentCategories) return;
-    console.log('Incident:', message.content);
     await message.react('🚨');
     const context = await prisma.message
       .findMany({ where: { guildSf, channelSf }, orderBy: { at: 'asc' } })
@@ -457,11 +504,37 @@ client.once('ready', () => {
         categories: incidentCategories,
       },
     });
-    console.log(`Message ${message.id}: ${incidentCategories}: ${incident.id}`);
+    IncidentLog(
+      incident,
+      `**New incident.** <@${authorSf}>. Flagged for *${incidentCategories}*. `,
+      content,
+    );
     await DutyCycle(ctx)();
   });
 
   client.on('interactionCreate', async interaction => {
+    if (!interaction.guildId) return;
+    if (interaction.isCommand()) {
+      if (interaction.commandName === 'audit-here') {
+        const sf = BigInt(interaction.guildId);
+        const existing = await prisma.guild.findUnique({ where: { sf } });
+        const auditChannelSf = existing?.auditChannelSf
+          ? null
+          : BigInt(interaction.channelId);
+        await prisma.guild.upsert({
+          where: { sf },
+          create: { sf, auditChannelSf },
+          update: { auditChannelSf },
+        });
+        await interaction.reply({
+          content: auditChannelSf
+            ? 'This channel will now be used for auditing.'
+            : 'This channel is no longer being used for auditing.',
+          ephemeral: true,
+        });
+        return;
+      }
+    }
     if (!interaction.isButton() || !interaction.guildId) return;
     await interaction.deferReply({ flags: 'Ephemeral' });
     const [guildSf, userSf] = [
@@ -497,6 +570,10 @@ client.once('ready', () => {
       await interaction.editReply(`You have pardoned <@${offenderSf}>.
 For ${hours}h I will ignore incidents against you by them.`);
       await interaction.message.delete();
+      IncidentLog(
+        incident,
+        `**Victim <@${userSf}> pardoned offender <@${offenderSf}>.**`,
+      );
     }
     if (isProsecute) {
       await prisma.probation.create({
@@ -509,6 +586,10 @@ For ${hours}h I will ignore incidents against you by them.`);
         'Their behaviour will now be closely watched, thank you.',
       );
       await interaction.message.delete();
+      IncidentLog(
+        incident,
+        `**Victim <@${userSf}> prosecuted offender <@${offenderSf}>.**`,
+      );
     }
   });
 });
