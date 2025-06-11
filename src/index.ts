@@ -11,13 +11,15 @@ import { IncidentLog } from './audit';
 
 //FIXME: people can offend the bot
 //TODO: what about, instead of a timeout, just blindly delete all suspicious messages for the next hour?
+//TODO: try just group intervention, with one prompt asking for devil's advocate and if anybody's actually offended
+//TODO: start out new members in silent probation, or implement special bouncer routine which evaluates all their messages
 
 type Ctx = { apiKey: string };
 
 const dutyCycleMs = 15_000;
 /** Statute of limitations */
 const limitationMs = 60_000;
-const probationMs = 60 * 60_000;
+const probationMs = 30 * 60_000;
 const pardonMs = 24 * 60 * 60_000;
 const muteMs = 60 * 60_000;
 let dutyCycleTimer: NodeJS.Timeout | undefined;
@@ -142,26 +144,30 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     const victimTag = victim ? victim.tag : 'Unknown';
     const victimUrl = victim ? victim.displayAvatarURL() : '';
     const intervention = { victimSf, rule, victimTag, victimUrl };
-    await prisma.incident.update({
+    const i = await prisma.incident.update({
       where: { id: incident.id },
       data: {
         resolution: `Intervened in protection of <@${victimSf}>`,
         victimInterventions: { create: intervention },
       },
+      include: { victimInterventions: true },
     });
     if (!victim) {
       IncidentLog(incident, `**Victim not reachable: <@${victimSf}>.**`);
       console.warn(`Victim ${victimSf} not found.`);
       return;
     }
+    const victimIntervention = i.victimInterventions[0]!;
     //Beg pardon
     const components = [
       {
-        ...{ customId: `pardon-${offenderSf}`, label: 'I forgive them' },
+        label: 'I forgive them',
+        customId: `pardon-${victimIntervention.id}`,
         ...{ type: ComponentType.Button, style: ButtonStyle.Success },
       },
       {
-        ...{ customId: `prosecute-${offenderSf}`, label: 'I dislike it' },
+        label: 'I dislike it',
+        customId: `prosecute-${victimIntervention.id}`,
         ...{ type: ComponentType.Button, style: ButtonStyle.Danger },
       },
     ];
@@ -300,10 +306,6 @@ async function ProcessProbations() {
           },
         ],
       });
-      await prisma.probation.update({
-        where: { id: probation.id },
-        data: { startInformed: true },
-      });
       IncidentLog(incident, `**Notified <@${offender.id}> of probation.**`);
     } catch (err) {
       IncidentLog(
@@ -312,6 +314,10 @@ async function ProcessProbations() {
       );
       console.error(`Failed to notify offender ${offender.id}:`, err);
     }
+    await prisma.probation.update({
+      where: { id: probation.id },
+      data: { startInformed: true },
+    });
   }
   for (const probation of expiryUninformedProbations) {
     const { originalIncident: incident } = probation;
@@ -479,7 +485,7 @@ client.once('ready', () => {
       truncate(message.content, 512) +
       (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '') +
       message.attachments.map(a => `[Attachment: ${a.name}]`).join(' ');
-    const content = unsanitised.replace(/\\/g, '\\\\');
+    const content = unsanitised.replace(/\\/g, '/');
     await prisma.message.create({
       data: { guildSf, channelSf, messageSf, authorSf, content },
     });
@@ -516,9 +522,24 @@ client.once('ready', () => {
   });
 
   client.on('interactionCreate', async interaction => {
-    if (!interaction.guildId) return;
+    if (!interaction.guildId || !interaction.guild || !interaction.member)
+      return;
     if (interaction.isCommand()) {
       if (interaction.commandName === 'audit-here') {
+        //Check the user has higher role than the bot
+        const me = await interaction.guild.members.fetchMe();
+        const them = await interaction.guild.members.fetch(interaction.user.id);
+        if (
+          !me.roles.highest ||
+          !them.roles.highest ||
+          them.roles.highest.position <= me.roles.highest.position
+        ) {
+          await interaction.reply({
+            content: 'You must have a higher role than me to use this command.',
+            ephemeral: true,
+          });
+          return;
+        }
         const sf = BigInt(interaction.guildId);
         const existing = await prisma.guild.findUnique({ where: { sf } });
         const auditChannelSf = existing?.auditChannelSf
@@ -546,47 +567,41 @@ client.once('ready', () => {
     ];
     const isPardon = interaction.customId.startsWith('pardon-');
     const isProsecute = interaction.customId.startsWith('prosecute-');
-    const offenderSf = BigInt(interaction.customId.split('-')[1]!);
-    const [incident] = await prisma.incident.findMany({
-      where: { guildSf, offenderSf, victimInterventions: { some: {} } },
-      include: { victimInterventions: true },
+    const victimInterventionId = Number(interaction.customId.split('-')[1]!);
+    const victimIntervention = await prisma.victimIntervention.findFirst({
+      where: { id: victimInterventionId },
+      include: { incident: true },
     });
-    if (!incident) {
-      await interaction.editReply('Incident not found.');
-      return;
-    }
-    const victimIntervention = incident.victimInterventions[0];
     if (!victimIntervention) {
-      console.warn(`Incident ${incident.id} has no victim intervention.`);
+      console.warn(`Victim intervention ${victimInterventionId} not found.`);
       return;
     }
-    const { victimSf } = victimIntervention;
-    if (userSf !== victimSf) {
+    if (victimIntervention.victimSf !== userSf) {
       await interaction.editReply(
-        `You are not the victim of this incident - <@${victimSf}> is.`,
+        `You are not the victim of this incident - <@${victimIntervention.victimSf}> is.`,
       );
       return;
     }
     if (isPardon) {
       await prisma.pardon.create({
         data: {
-          incidentId: incident.id,
+          incidentId: victimIntervention.incident.id,
           interventionId: victimIntervention.id,
         },
       });
       const hours = Math.floor(pardonMs / (60 * 60_000));
-      await interaction.editReply(`You have pardoned <@${offenderSf}>.
+      await interaction.editReply(`You have pardoned <@${victimInterventionId}>.
 For ${hours}h I will ignore incidents against you by them.`);
       await interaction.message.delete();
       IncidentLog(
-        incident,
-        `**Victim <@${userSf}> pardoned offender <@${offenderSf}>.**`,
+        victimIntervention.incident,
+        `**Victim <@${userSf}> pardoned offender <@${victimInterventionId}>.**`,
       );
     }
     if (isProsecute) {
       await prisma.probation.create({
         data: {
-          originalIncidentId: incident.id,
+          originalIncidentId: victimIntervention.incident.id,
           expiresAt: new Date(Date.now() + probationMs),
         },
       });
@@ -595,8 +610,8 @@ For ${hours}h I will ignore incidents against you by them.`);
       );
       await interaction.message.delete();
       IncidentLog(
-        incident,
-        `**Victim <@${userSf}> prosecuted offender <@${offenderSf}>.**`,
+        victimIntervention.incident,
+        `**Victim <@${userSf}> prosecuted offender <@${victimInterventionId}>.**`,
       );
     }
   });
