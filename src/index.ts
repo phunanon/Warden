@@ -132,8 +132,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     } catch {}
   }
   if (result.kind === 'punish') {
-    const { thoughts, caution = 'The server does not tolerate misbehaviour.' } =
-      result;
+    const { thoughts, caution, notification } = result;
     IncidentLog(
       incident,
       ':rotating_light: **Intervention required.**',
@@ -142,6 +141,26 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
 
     const messageStatus = (() => {
       if (!message) return 'not found';
+      if (notification) {
+        const payload = {
+          content:
+            '_' +
+            notification.replace(/\[offender\]/g, `<@${incident.offenderSf}>`) +
+            '_',
+          allowedMentions: { parse: [] },
+        };
+        try {
+          if (message.reference && !message.messageSnapshots.size) {
+            void message
+              .fetchReference()
+              .then(reference => reference.reply(payload));
+          } else if ('send' in message.channel) {
+            void message.channel.send(payload);
+          }
+        } catch (err) {
+          console.error('Failed to paraphrase:', err);
+        }
+      }
       void message.delete();
       return 'deleted';
     })();
@@ -152,7 +171,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
 
     if (await MatchPriorIncident(incident)) return;
 
-    {
+    try {
       const guild = await client.guilds.fetch(`${incident.guildSf}`);
       if (!guild) {
         console.warn(`Guild ${incident.guildSf} not found.`);
@@ -163,19 +182,20 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         console.warn(`Offender ${incident.offenderSf} not found.`);
         return;
       }
-      try {
-        await offender.timeout(
-          10_000,
-          `To read my DM about incident #${incident.id}`,
-        );
-      } catch (err) {
-        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
-      }
+      await offender.timeout(
+        10_000,
+        `To read my DM about incident #${incident.id}`,
+      );
+    } catch (err) {
+      console.error(
+        `Failed to briefly timeout offender ${incident.offenderSf}:`,
+        err,
+      );
     }
     const expiresAt = new Date(Date.now() + probationMs);
     await prisma.incident.update({
       where: { id: incident.id },
-      data: { probations: { create: { expiresAt, caution } } },
+      data: { probations: { create: { expiresAt, caution, notification } } },
     });
   }
 }
@@ -206,28 +226,24 @@ async function ProcessProbations() {
     where: { startInformed: false },
     include: { originalIncident: true },
   });
-  const expiryUninformedProbations = await prisma.probation.findMany({
-    where: { expiresAt: { lt: new Date() }, endInformed: false },
-    include: { originalIncident: true },
-  });
-  if (!startUninformedProbations.length && !expiryUninformedProbations.length) {
+  if (!startUninformedProbations.length) {
     console.log('No probations to process.');
     return;
   }
   for (const probation of startUninformedProbations) {
     const { originalIncident: incident, caution } = probation;
-    const offender = await client.users.fetch(`${incident.offenderSf}`);
-    if (!offender) {
-      console.warn(`Offender ${incident.offenderSf} not found.`);
-      continue;
-    }
     const t = Math.floor(probation.expiresAt.getTime() / 1000);
     try {
+      const offender = await client.users.fetch(`${incident.offenderSf}`);
+      if (!offender) {
+        console.warn(`Offender ${incident.offenderSf} not found.`);
+        continue;
+      }
       await offender.send({
         embeds: [
           {
             title: "I'm going to be watching you closely.",
-            description: caution,
+            description: caution ?? undefined,
             color: 0xffff00,
             fields: [
               { name: 'You sent', value: `> ${incident.msgContent}` },
@@ -244,48 +260,21 @@ async function ProcessProbations() {
           },
         ],
       });
-      IncidentLog(incident, `**Cautioned <@${offender.id}>.**`, caution);
+      IncidentLog(
+        incident,
+        `**Cautioned <@${offender.id}>.**`,
+        caution ?? undefined,
+      );
     } catch (err) {
       IncidentLog(
         incident,
-        `**Failed to notify <@${offender.id}> of probation.**`,
+        `**Failed to notify <@${incident.offenderSf}> of probation.**`,
       );
-      console.error(`Failed to notify offender ${offender.id}:`, err);
+      console.error(`Failed to notify offender ${incident.offenderSf}:`, err);
     }
     await prisma.probation.update({
       where: { id: probation.id },
       data: { startInformed: true },
-    });
-  }
-  for (const probation of expiryUninformedProbations) {
-    const { originalIncident: incident } = probation;
-    const offender = await client.users.fetch(`${incident.offenderSf}`);
-    if (!offender) {
-      console.warn(`Offender ${incident.offenderSf} not found.`);
-      continue;
-    }
-    try {
-      await offender.send({
-        embeds: [
-          {
-            title: 'Thank you.',
-            description: 'You are forgiven for the earlier incident.',
-            color: 0x00ff00,
-            footer: { text: `Incident #${incident.id}` },
-          },
-        ],
-      });
-      IncidentLog(incident, `**<@${offender.id}> is forgiven.**`);
-    } catch (err) {
-      IncidentLog(
-        incident,
-        `**Failed to notify offender <@${offender.id}> of forgiveness.**`,
-      );
-      console.error(`Failed to notify ex-offender ${offender.id}:`, err);
-    }
-    await prisma.probation.update({
-      where: { id: probation.id },
-      data: { endInformed: true },
     });
   }
 }
@@ -325,17 +314,22 @@ client.once('ready', () => {
       BigInt(message.id),
       BigInt(message.author.id),
     ];
-    const repliedTo = message.reference?.messageId
-      ? await (async messageId => {
-          try {
-            return await message.channel.messages
-              .fetch(messageId)
-              .then(m => m.content);
-          } catch {}
-        })(message.reference.messageId)
-      : undefined;
+    const repliedTo =
+      !message.messageSnapshots.size && message.reference?.messageId
+        ? await (async messageId => {
+            try {
+              return await message.channel.messages
+                .fetch(messageId)
+                .then(m => m.content);
+            } catch {}
+          })(message.reference.messageId)
+        : undefined;
     const unsanitised =
-      truncate(message.content, 512) +
+      truncate(
+        message.content ||
+          [...message.messageSnapshots].map(x => x[1].content).join('\n'),
+        512,
+      ) +
       (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '') +
       message.attachments.map(a => `[Attachment: ${a.name}]`).join(' ');
     const content = unsanitised.replace(/\\/g, '/');
@@ -345,7 +339,11 @@ client.once('ready', () => {
     await prisma.$queryRawTyped(deleteOldMessages());
     const incidentCategories = await (async () => {
       try {
-        return await DetectIncident(OPENAI_API_KEY, message);
+        return await DetectIncident(
+          OPENAI_API_KEY,
+          content,
+          message.attachments,
+        );
       } catch {}
     })();
     if (!incidentCategories) return;
@@ -406,11 +404,6 @@ client.once('ready', () => {
       return;
     }
     if (interaction.commandName !== 'audit-here') return;
-    // interaction.guild.channels
-    //   .fetch('981171582691082240')
-    //   .then(x =>
-    //     x?.send('<@1371248865159942175> and <@1272273667283488881> shall duel to the death.'),
-    //   );
     //Check the user has higher role than the bot
     const me = await interaction.guild.members.fetchMe();
     const them = await interaction.guild.members.fetch(interaction.user.id);

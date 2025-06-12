@@ -46,9 +46,9 @@ model Probation {
   at                 DateTime @default(now())
   originalIncidentId Int
   expiresAt          DateTime
-  caution            String
+  caution            String?
+  notification       String?
   startInformed      Boolean  @default(false)
-  endInformed        Boolean  @default(false)
 
   originalIncident Incident     @relation(fields: [originalIncidentId], references: [id], onDelete: Cascade)
   Punishment       Punishment[]

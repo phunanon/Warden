@@ -3,18 +3,15 @@ import OpenAI from 'openai';
 
 export async function DetectIncident(
   apiKey: string,
-  message: Message,
+  content: string,
+  attachments: Message['attachments'],
 ): Promise<false | string> {
   const openai = new OpenAI({ apiKey });
   const input: OpenAI.Moderations.ModerationMultiModalInput[] = [];
-  if (message.content)
-    input.push({
-      type: 'text' as const,
-      text: message.content.normalize('NFKD'),
-    });
+  input.push({ type: 'text' as const, text: content.normalize('NFKD') });
 
   //TODO: handle more attachments and filter out more attachment types
-  const [attachment] = message.attachments.values();
+  const [attachment] = attachments.values();
   if (attachment && !/\.mp4/.test(attachment.name))
     input.push({
       type: 'image_url' as const,

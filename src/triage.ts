@@ -15,7 +15,7 @@ Joking is allowed, but not if others are evidently uncomfortable.`;
 type Settings = ChatCompletionCreateParamsNonStreaming;
 type TriageResult = { thoughts: string } & (
   | { kind: 'ignore' }
-  | { kind: 'punish'; caution?: string }
+  | { kind: 'punish'; caution?: string; notification?: string }
 );
 
 export const TriageIncident = async (
@@ -31,8 +31,14 @@ export const TriageIncident = async (
     caution: z
       .string()
       .nullable()
+      .describe('A private message sent to the offender if they are punished.'),
+    notification: z
+      .string()
+      .nullable()
       .describe(
-        'Compose a private message to send to the offender in the case of punishment.',
+        `If punished the latest message will be deleted, so this is one sentence that will replace it in the chat so members know vaguely what was said and that it was removed.
+Use [offender] in place of their username, which will be replaced with their actual username. Ensure the user name is always mentioned in the notification.
+E.g. [offender] expressed hostility and wishes harm upon others, which has been removed.`,
       ),
   });
 
@@ -62,6 +68,7 @@ Play devil's advocate and, in a few sentences or fewer, explain if the latest me
       kind: 'punish',
       thoughts: response.explanation,
       caution: response.caution ?? undefined,
+      notification: response.notification ?? undefined,
     };
   }
   return { kind: 'ignore', thoughts: response.explanation };
