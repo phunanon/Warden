@@ -4,167 +4,67 @@ import { ChatCompletionCreateParamsNonStreaming } from 'openai/resources';
 import z, { ZodType } from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
 
-const rules: [string, ...string[]] = [
-  'Respect others: No hate speech, harassment, doxing, or shaming.',
-  'Keep it clean: No threatening language, and no adult themes.',
-  'No trolling or inciting drama: Keep interactions constructive.',
-];
-
 const model = 'gpt-4.1-nano';
 const preamble = `You are a Discord moderator, able to see the latest messages between Discord users in a channel.
-There are both minors and adult in the chat.`;
+There are both adults and minors in the chat, therefore there should be no sexual language.
+We uphold the right to free speech and the right to express yourself, but also the right to not be harassed or bullied.
+We allow discussions of sensitive topics, but not in a way that is harmful to others.
+We do not allow the use of slurs, hate speech, or any other form of discrimination.
+Joking is allowed, but not if others are evidently uncomfortable.`;
 
 type Settings = ChatCompletionCreateParamsNonStreaming;
-type TriageResult =
-  | { ignoreReason: string }
-  | { victimId: string; rule: string; reason: string }
-  | { delete: boolean; rule: string; reason: string };
+type TriageResult = { thoughts: string } & (
+  | { kind: 'ignore' }
+  | { kind: 'punish'; caution?: string }
+);
 
 export const TriageIncident = async (
   apiKey: string,
   incident: Incident,
 ): Promise<TriageResult> => {
   const openai = new OpenAI({ apiKey });
-  const ruleBreak = await (async () => {
-    const { offenderSf, categories } = incident;
-    //Repeats the last message so simpler models are less confused
-    const context = `${incident.context}
+  const { offenderSf, categories } = incident;
+
+  const schema = z.object({
+    explanation: z.string(),
+    'punish them?': z.boolean(),
+    caution: z
+      .string()
+      .nullable()
+      .describe(
+        'Compose a private message to send to the offender in the case of punishment.',
+      ),
+  });
+
+  //Repeats the last message so simpler models are less confused
+  const context = `${incident.context}
 
 Latest message by ${offenderSf}:
 ${incident.msgContent}`;
-    const schema = z.object({
-      brokenRule: z.enum(rules).nullable(),
-      reason: z.string(),
-      victim: z
-        .string()
-        .regex(/^[0-9]+$/)
-        .describe('the victim ID, if applicable')
-        .or(z.literal('everybody')),
-      'Should the message be deleted immediately?': z.boolean(),
-    });
-    const settings: Settings = {
-      response_format: zodResponseFormat(schema, 'ruleBreak'),
-      model,
-      messages: [
-        {
-          role: 'system',
-          content: `${preamble}
-The Discord server has these rules:
-${rules.map(rule => `- ${rule}`).join('\n')}.
 
-The latest message by ${offenderSf} has been flagged by an automatic system for these suspected issues:
-${categories}
-
-Determine if user ${offenderSf} is violating any of these rules.
-Also determine if the message is directed specifically at someone else (a victim).
-In a few sentences or fewer, explain your reasoning.`,
-        },
-        { role: 'user', content: context },
-      ],
-    };
-    const ruleBreakResponse = await ai(openai, schema, settings);
-
-    if (!ruleBreakResponse.brokenRule) {
-      return ruleBreakResponse;
-    }
-
-    if (ruleBreakResponse.victim === `${offenderSf}`) {
-      return {
-        brokenRule: null,
-        reason: 'Victim is the offender.',
-        victim: 'everybody',
-        'Should the message be deleted immediately?': false,
-      };
-    }
-
-    if (ruleBreakResponse.victim !== 'everybody') {
-      const victimSchema = z.object({
-        'your thoughts': z.string(),
-        'still truly the victim?': z.boolean(),
-      });
-      const victimSettings: Settings = {
-        response_format: zodResponseFormat(victimSchema, 'victimCheck'),
-        model,
-        messages: [
-          {
-            role: 'system',
-            content: `${preamble}
-
-Another moderator decided there is a particular victim: ${ruleBreakResponse.victim}
-
-Play devil's advocate and, in only a couple sentences, explain if the latest message by ${offenderSf}, in context, is not specifically directed at ${ruleBreakResponse.victim}.
-There are other people in the chat reading the conversation.`,
-          },
-          { role: 'user', content: context },
-        ],
-      };
-      const victimResponse = await ai(openai, victimSchema, victimSettings);
-      if (victimResponse['still truly the victim?']) {
-        return {
-          ...ruleBreakResponse,
-          reason:
-            ruleBreakResponse.reason +
-            "\nVictim-check devil's advocate said: " +
-            victimResponse['your thoughts'],
-        };
-      }
-      console.log('Ignoring victim:', victimResponse['your thoughts']);
-    }
-
-    const devilSchema = z.object({
-      'your thoughts': z.string(),
-      'continue with intervention?': z.boolean(),
-    });
-    const devilSettings: Settings = {
-      response_format: zodResponseFormat(devilSchema, 'devilsAdvocate'),
-      model,
-      messages: [
-        {
-          role: 'system',
-          content: `${preamble}
-
-Another moderator has flagged a message for breaking this rule:
-${ruleBreakResponse.brokenRule}
-
-Play devil's advocate and, in a few sentences or fewer, explain if the latest message by ${offenderSf}, in context, is actually alright.
-Especially in protection of free-speech, and the right to express oneself.`,
-        },
-        { role: 'user', content: context },
-      ],
-    };
-    const devilsAdvocateResponse = await ai(openai, devilSchema, devilSettings);
-    if (devilsAdvocateResponse['continue with intervention?']) {
-      return {
-        ...ruleBreakResponse,
-        reason:
-          ruleBreakResponse.reason +
-          "\nDevil's advocate said: " +
-          devilsAdvocateResponse['your thoughts'],
-      };
-    }
+  const settings: Settings = {
+    response_format: zodResponseFormat(schema, 'response'),
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: `${preamble}
+          
+An automatic system has found the latest message by ${offenderSf} to be suspicious.
+Play devil's advocate and, in a few sentences or fewer, explain if the latest message by ${offenderSf}, in context, is actually alright.`,
+      },
+      { role: 'user', content: context },
+    ],
+  };
+  const response = await ai(openai, schema, settings);
+  if (response['punish them?']) {
     return {
-      brokenRule: null,
-      reason:
-        ruleBreakResponse.reason +
-        "\nBut then the devil's advocate concluded: " +
-        devilsAdvocateResponse['your thoughts'],
-    };
-  })();
-  if (!ruleBreak.brokenRule) {
-    return { ignoreReason: ruleBreak.reason };
-  }
-  if (ruleBreak.victim !== 'everybody') {
-    const [victimId, rule] = [ruleBreak.victim, ruleBreak.brokenRule];
-    return { victimId, rule, reason: ruleBreak.reason };
-  }
-  if (ruleBreak.victim === 'everybody') {
-    return {
-      delete: ruleBreak['Should the message be deleted immediately?'],
-      rule: ruleBreak.brokenRule,
-      reason: ruleBreak.reason,
+      kind: 'punish',
+      thoughts: response.explanation,
+      caution: response.caution ?? undefined,
     };
   }
-  throw new Error(`Unexpected triage result: ${JSON.stringify(ruleBreak)}`);
+  return { kind: 'ignore', thoughts: response.explanation };
 };
 
 const ai = async <T>(

@@ -8,13 +8,6 @@ datasource db {
   url      = "file:./db.db"
 }
 
-model Rule {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now())
-  guildSf   BigInt
-  rule      String
-}
-
 model Guild {
   id             Int      @id @default(autoincrement())
   createdAt      DateTime @default(now())
@@ -33,56 +26,19 @@ model Message {
 }
 
 model Incident {
-  id         Int      @id @default(autoincrement())
-  at         DateTime @default(now())
-  guildSf    BigInt
-  channelSf  BigInt
-  offenderSf BigInt
-  messageSf  BigInt
-  msgContent String
-  categories String
-  context    String
-  resolution String?
-  pardoned   Boolean  @default(false)
-
-  groupInterventions  GroupIntervention[]
-  victimInterventions VictimIntervention[]
-  pardons             Pardon[]
-  probations          Probation[]
-  punishments         Punishment[]
-}
-
-model GroupIntervention {
-  id         Int      @id @default(autoincrement())
-  at         DateTime @default(now())
-  incidentId Int
-  rule       String
-  msgDeleted Boolean
-
-  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
-}
-
-model VictimIntervention {
-  id         Int      @id @default(autoincrement())
-  at         DateTime @default(now())
-  incidentId Int
-  rule       String
-  victimSf   BigInt
-  victimTag  String
-  victimUrl  String
-
-  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
-  Pardon   Pardon[]
-}
-
-model Pardon {
   id             Int      @id @default(autoincrement())
   at             DateTime @default(now())
-  incidentId     Int
-  interventionId Int
+  guildSf        BigInt
+  channelSf      BigInt
+  offenderSf     BigInt
+  messageSf      BigInt
+  msgContent     String
+  categories     String
+  context        String
+  ignoredBecause String?
 
-  incident     Incident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
-  intervention VictimIntervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  probations  Probation[]
+  punishments Punishment[]
 }
 
 model Probation {
@@ -90,6 +46,7 @@ model Probation {
   at                 DateTime @default(now())
   originalIncidentId Int
   expiresAt          DateTime
+  caution            String
   startInformed      Boolean  @default(false)
   endInformed        Boolean  @default(false)
 
@@ -103,9 +60,6 @@ model Punishment {
   probationId      Int
   secondIncidentId Int
   until            DateTime
-  mute             Boolean
-  ban              Boolean
-  executed         Boolean  @default(false)
 
   probation      Probation @relation(fields: [probationId], references: [id], onDelete: Cascade)
   secondIncident Incident  @relation(fields: [secondIncidentId], references: [id], onDelete: Cascade)

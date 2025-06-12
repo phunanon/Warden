@@ -1,7 +1,7 @@
 import { Incident } from '@prisma/client';
 import { client, prisma } from '.';
 
-const flushMs = 15_000;
+const flushMs = 10_000;
 
 type LogAggregate = {
   incident: Incident;

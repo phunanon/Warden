@@ -4,15 +4,12 @@ dotenv.config();
 import { Incident, PrismaClient } from '@prisma/client';
 import { deleteOldMessages } from '@prisma/client/sql';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
-import { ButtonStyle, ComponentType, Client } from 'discord.js';
+import { Client } from 'discord.js';
 import { DetectIncident } from './spotter';
 import * as Triage from './triage';
 import { IncidentLog } from './audit';
 
-//FIXME: people can offend the bot
-//TODO: what about, instead of a timeout, just blindly delete all suspicious messages for the next hour?
-//TODO: try just group intervention, with one prompt asking for devil's advocate and if anybody's actually offended
-//TODO: start out new members in silent probation, or implement special bouncer routine which evaluates all their messages
+//TODO: implement special bouncer routine which evaluates all new member's messages
 
 type Ctx = { apiKey: string };
 
@@ -20,8 +17,8 @@ const dutyCycleMs = 15_000;
 /** Statute of limitations */
 const limitationMs = 60_000;
 const probationMs = 30 * 60_000;
-const pardonMs = 24 * 60 * 60_000;
-const muteMs = 60 * 60_000;
+const punishmentHours = 1;
+const punishmentMs = punishmentHours * 60 * 60_000;
 let dutyCycleTimer: NodeJS.Timeout | undefined;
 
 export const prisma = new PrismaClient();
@@ -40,19 +37,27 @@ export const client = new Client({
 const truncate = (str: string, maxLength: number) =>
   str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
 
-async function MatchPriorIncident(
-  incident: Incident,
-  victimSf?: bigint,
-): Promise<boolean> {
+async function FetchOffender(guildSf: bigint, offenderSf: bigint) {
+  const guild = await client.guilds.fetch(`${guildSf}`);
+  if (!guild) {
+    console.warn(`Guild ${guildSf} not found.`);
+    return null;
+  }
+  const offender = await guild.members.fetch(`${offenderSf}`);
+  if (!offender) {
+    console.warn(`Offender ${offenderSf} not found.`);
+    return null;
+  }
+  return offender;
+}
+
+async function MatchPriorIncident(incident: Incident): Promise<boolean> {
   const [probation] = await prisma.probation.findMany({
     where: {
       originalIncident: {
         id: { not: incident.id },
         guildSf: incident.guildSf,
         offenderSf: incident.offenderSf,
-        ...(victimSf
-          ? { victimInterventions: { some: { victimSf } } }
-          : { groupInterventions: { some: {} } }),
       },
       expiresAt: { gt: new Date() },
     },
@@ -62,16 +67,44 @@ async function MatchPriorIncident(
 
   const prior = probation.originalIncident;
   IncidentLog(incident, `**Incident is a repeat of #${prior.id}.**`);
-  const until = new Date(Date.now() + muteMs);
+  const until = new Date(Date.now() + punishmentMs);
   await prisma.incident.update({
     where: { id: incident.id },
-    data: {
-      resolution: 'Repeat incident',
-      punishments: {
-        create: { probationId: probation.id, until, mute: true, ban: false },
-      },
-    },
+    data: { punishments: { create: { probationId: probation.id, until } } },
   });
+
+  const offender = await FetchOffender(incident.guildSf, incident.offenderSf);
+  const t = Math.floor(until.getTime() / 1000);
+  try {
+    await offender?.send({
+      embeds: [
+        {
+          title: `You misbehaved again!`,
+          description:
+            'I told you if you if you broke the same rule again this would happen.',
+          fields: [
+            { name: 'You sent', value: `> ${incident.msgContent}` },
+            {
+              name: 'What happens now',
+              value: `Any suspicious messages will be automatically deleted`,
+            },
+            { name: 'When this will stop happening', value: `<t:${t}:R>` },
+          ],
+          color: 0xff0000,
+          footer: { text: `Incident #${incident.id}` },
+        },
+      ],
+    });
+  } catch (err) {
+    IncidentLog(
+      incident,
+      `**Failed to notify <@${offender?.user.id}> of repeat incident.**`,
+    );
+    console.error(
+      `Failed to notify repeat offender ${offender?.user.id}:`,
+      err,
+    );
+  }
   return true;
 }
 
@@ -88,114 +121,29 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         );
     } catch {}
   })();
-  if ('ignoreReason' in result) {
-    IncidentLog(incident, '**Incident ignored.**', result.ignoreReason);
+  if (result.kind === 'ignore') {
+    IncidentLog(incident, '**Incident ignored.**', result.thoughts);
     await prisma.incident.update({
       where: { id: incident.id },
-      data: { resolution: result.ignoreReason },
+      data: { ignoredBecause: result.thoughts },
     });
     try {
       await message?.reactions.resolve('🚨')?.remove();
     } catch {}
-    return;
   }
-  if ('victimId' in result) {
-    const { victimId, rule, reason } = result;
-    IncidentLog(incident, `**Detected victim: <@${victimId}>.**`, reason);
-    const { guildSf, offenderSf } = incident;
-    const pardonsSince = new Date(Date.now() - pardonMs);
-    const pardons = await prisma.pardon
-      .findMany({
-        where: { incident: { guildSf, offenderSf }, at: { gt: pardonsSince } },
-        include: { intervention: { select: { victimSf: true } } },
-      })
-      .then(p => p.map(p => p.intervention.victimSf));
-    if (!/^[0-9]+$/.test(victimId)) {
-      IncidentLog(incident, '**AI error.**');
-      console.warn(
-        `Invalid victim ID format: "${victimId}". Expected a numeric SF.`,
-      );
-      return;
-    }
-    const victimSf = BigInt(victimId);
-    if (pardons.includes(victimSf)) {
-      IncidentLog(
-        incident,
-        `**Ignoring incident.** Offender <@${offenderSf}> previously pardoned by victim <@${victimSf}>.`,
-      );
-      await prisma.incident.update({
-        where: { id: incident.id },
-        data: { resolution: 'Pardon found for victim', pardoned: true },
-      });
-      try {
-        await message?.reactions.resolve('🚨')?.remove();
-      } catch {}
-      return;
-    }
-
-    if (await MatchPriorIncident(incident, victimSf)) return;
-
-    IncidentLog(incident, `**Intervening for victim <@${victimSf}>.**`);
-    const victim = await (async () => {
-      try {
-        return await client.users.fetch(`${victimSf}`);
-      } catch {}
-    })();
-    const victimTag = victim ? victim.tag : 'Unknown';
-    const victimUrl = victim ? victim.displayAvatarURL() : '';
-    const intervention = { victimSf, rule, victimTag, victimUrl };
-    const i = await prisma.incident.update({
-      where: { id: incident.id },
-      data: {
-        resolution: `Intervened in protection of <@${victimSf}>`,
-        victimInterventions: { create: intervention },
-      },
-      include: { victimInterventions: true },
-    });
-    if (!victim) {
-      IncidentLog(incident, `**Victim not reachable: <@${victimSf}>.**`);
-      console.warn(`Victim ${victimSf} not found.`);
-      return;
-    }
-    const victimIntervention = i.victimInterventions[0]!;
-    //Beg pardon
-    const components = [
-      {
-        label: 'I forgive them',
-        customId: `pardon-${victimIntervention.id}`,
-        ...{ type: ComponentType.Button, style: ButtonStyle.Success },
-      },
-      {
-        label: 'I dislike it',
-        customId: `prosecute-${victimIntervention.id}`,
-        ...{ type: ComponentType.Button, style: ButtonStyle.Danger },
-      },
-    ];
-    await message?.reply({
-      allowedMentions: { parse: [] },
-      embeds: [
-        {
-          author: { name: `${victimTag}'s decision`, icon_url: victimUrl },
-          title: 'Is this message okay?',
-          color: 0xffff00,
-        },
-      ],
-      components: [{ type: ComponentType.ActionRow, components }],
-    });
-  } else if ('delete' in result) {
-    const { delete: msgDeleted, rule, reason } = result;
-    IncidentLog(incident, '**Intervening for group protection.**', reason);
+  if (result.kind === 'punish') {
+    const { thoughts, caution = 'The server does not tolerate misbehaviour.' } =
+      result;
+    IncidentLog(
+      incident,
+      ':rotating_light: **Intervention required.**',
+      thoughts,
+    );
 
     const messageStatus = (() => {
       if (!message) return 'not found';
-      if (msgDeleted) {
-        void message.delete();
-        return 'deleted';
-      }
-      void message.reply(
-        `I'd like everybody to know this message breaks a rule: ${rule}.`,
-      );
-      return 'replied to';
+      void message.delete();
+      return 'deleted';
     })();
     IncidentLog(
       incident,
@@ -215,21 +163,19 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         console.warn(`Offender ${incident.offenderSf} not found.`);
         return;
       }
-      const reason = `To read my DM; rule: ${rule.slice(0, 24)}...`;
       try {
-        await offender.timeout(30_000, reason);
+        await offender.timeout(
+          10_000,
+          `To read my DM about incident #${incident.id}`,
+        );
       } catch (err) {
-        console.error(`Failed to mute offender ${offender.user.id}:`, err);
+        console.error(`Failed to timeout offender ${offender.user.id}:`, err);
       }
     }
     const expiresAt = new Date(Date.now() + probationMs);
     await prisma.incident.update({
       where: { id: incident.id },
-      data: {
-        resolution: 'Intervened to protect the group',
-        groupInterventions: { create: { rule, msgDeleted } },
-        probations: { create: { expiresAt } },
-      },
+      data: { probations: { create: { expiresAt, caution } } },
     });
   }
 }
@@ -238,10 +184,9 @@ async function ProcessIncidents(ctx: Ctx) {
   const unprocessed = await prisma.incident.findMany({
     where: {
       at: { gt: new Date(Date.now() - limitationMs) },
-      resolution: null,
-      groupInterventions: { none: {} },
-      victimInterventions: { none: {} },
+      ignoredBecause: null,
       probations: { none: {} },
+      punishments: { none: {} },
     },
   });
   if (unprocessed.length) {
@@ -257,34 +202,20 @@ async function ProcessIncidents(ctx: Ctx) {
 }
 
 async function ProcessProbations() {
-  const include = {
-    originalIncident: {
-      include: { victimInterventions: true, groupInterventions: true },
-    },
-  };
   const startUninformedProbations = await prisma.probation.findMany({
     where: { startInformed: false },
-    include,
+    include: { originalIncident: true },
   });
   const expiryUninformedProbations = await prisma.probation.findMany({
     where: { expiresAt: { lt: new Date() }, endInformed: false },
-    include,
+    include: { originalIncident: true },
   });
   if (!startUninformedProbations.length && !expiryUninformedProbations.length) {
     console.log('No probations to process.');
     return;
   }
   for (const probation of startUninformedProbations) {
-    const { originalIncident: incident } = probation;
-    const [intervention] = [
-      ...incident.victimInterventions,
-      ...incident.groupInterventions,
-    ];
-    if (!intervention) {
-      console.warn(`No intervention found for probation ${probation.id}.`);
-      continue;
-    }
-    const { rule } = intervention;
+    const { originalIncident: incident, caution } = probation;
     const offender = await client.users.fetch(`${incident.offenderSf}`);
     if (!offender) {
       console.warn(`Offender ${incident.offenderSf} not found.`);
@@ -295,18 +226,25 @@ async function ProcessProbations() {
       await offender.send({
         embeds: [
           {
-            title: 'You broke a rule!',
-            description: `If you do it again before <t:${t}> you will be muted.`,
+            title: "I'm going to be watching you closely.",
+            description: caution,
             color: 0xffff00,
             fields: [
               { name: 'You sent', value: `> ${incident.msgContent}` },
-              { name: 'Broken rule', value: rule },
+              {
+                name: 'If you misbehave again',
+                value: `Any even slightly suspicious messages will be automatically deleted for ${punishmentHours}h.`,
+              },
+              {
+                name: 'If you do not misbehave',
+                value: `You will be forgiven <t:${t}:R>.`,
+              },
             ],
             footer: { text: `Incident #${incident.id}` },
           },
         ],
       });
-      IncidentLog(incident, `**Notified <@${offender.id}> of probation.**`);
+      IncidentLog(incident, `**Cautioned <@${offender.id}>.**`, caution);
     } catch (err) {
       IncidentLog(
         incident,
@@ -321,14 +259,6 @@ async function ProcessProbations() {
   }
   for (const probation of expiryUninformedProbations) {
     const { originalIncident: incident } = probation;
-    const [intervention] = [
-      ...incident.victimInterventions,
-      ...incident.groupInterventions,
-    ];
-    if (!intervention) {
-      console.warn(`No intervention found for probation ${probation.id}.`);
-      continue;
-    }
     const offender = await client.users.fetch(`${incident.offenderSf}`);
     if (!offender) {
       console.warn(`Offender ${incident.offenderSf} not found.`);
@@ -338,101 +268,24 @@ async function ProcessProbations() {
       await offender.send({
         embeds: [
           {
-            title: 'Thank you',
+            title: 'Thank you.',
             description: 'You are forgiven for the earlier incident.',
             color: 0x00ff00,
             footer: { text: `Incident #${incident.id}` },
           },
         ],
       });
-      IncidentLog(
-        incident,
-        `**Notified offender <@${offender.id}> of probation end.**`,
-      );
+      IncidentLog(incident, `**<@${offender.id}> is forgiven.**`);
     } catch (err) {
       IncidentLog(
         incident,
-        `**Failed to notify offender <@${offender.id}> of probation end.**`,
+        `**Failed to notify offender <@${offender.id}> of forgiveness.**`,
       );
-      console.error(`Failed to notify offender ${offender.id}:`, err);
+      console.error(`Failed to notify ex-offender ${offender.id}:`, err);
     }
     await prisma.probation.update({
       where: { id: probation.id },
       data: { endInformed: true },
-    });
-  }
-}
-
-async function ProcessPunishments() {
-  const unexecutedPunishments = await prisma.punishment.findMany({
-    where: { executed: false },
-    include: { probation: { include: { originalIncident: true } } },
-  });
-  if (!unexecutedPunishments.length) {
-    console.log('No punishments to process.');
-    return;
-  }
-  console.log(
-    `Found ${unexecutedPunishments.length} unexecuted punishment(s).`,
-  );
-  for (const punishment of unexecutedPunishments) {
-    const { probation, mute, ban, until } = punishment;
-    const { originalIncident: incident } = probation;
-    const { guildSf, offenderSf, resolution } = incident;
-    const guild = await client.guilds.fetch(`${guildSf}`);
-    if (!guild) {
-      console.warn(`Guild ${guildSf} not found for punishment.`);
-      return;
-    }
-    const offender = await guild.members.fetch(`${offenderSf}`);
-    if (!offender) {
-      console.warn(`Offender ${offenderSf} not found for punishment.`);
-      return;
-    }
-    try {
-      const muteStr = mute ? 'muted' : '';
-      const banStr = ban ? 'banned' : '';
-      await offender.send({
-        embeds: [
-          {
-            title: `You've been ${muteStr}${banStr}!`,
-            description: `I told you if you if you broke the same rule again this would happen.
-You'll be permitted to return at <t:${Math.floor(until.getTime() / 1000)}>.`,
-            color: 0xff0000,
-            footer: { text: `Incident #${incident.id}` },
-          },
-        ],
-      });
-    } catch (err) {
-      console.error(`Failed to notify offender ${offender.user.id}:`, err);
-    }
-    if (mute) {
-      try {
-        await offender.timeout(muteMs, 'Punishment');
-        IncidentLog(incident, `**Muted offender <@${offender.user.id}>.**`);
-      } catch (err) {
-        IncidentLog(
-          incident,
-          `**Failed to mute offender <@${offender.user.id}>.**`,
-        );
-        console.error(`Failed to mute offender ${offender.user.id}:`, err);
-      }
-    }
-    if (ban) {
-      try {
-        await offender.ban({ reason: resolution ?? 'Punishment' });
-        IncidentLog(incident, `**Banned offender <@${offender.user.id}>.**`);
-      } catch (err) {
-        IncidentLog(
-          incident,
-          `**Failed to ban offender <@${offender.user.id}>.**`,
-        );
-        console.error(`Failed to ban offender ${offender.user.id}:`, err);
-      }
-    }
-    await prisma.punishment.update({
-      where: { id: punishment.id },
-      data: { executed: true },
     });
   }
 }
@@ -447,7 +300,6 @@ const DutyCycle = (ctx: Ctx) => async () => {
   clearTimeout(dutyCycleTimer);
   await ProcessIncidents(ctx);
   await ProcessProbations();
-  await ProcessPunishments();
   dutyCycleTimer = setTimeout(DutyCycle(ctx), dutyCycleMs);
   dutyCycleSemaphore = false;
 };
@@ -465,6 +317,7 @@ client.once('ready', () => {
   });
 
   client.on('messageCreate', async message => {
+    // if (message.guildId !== '965259347250782238') return;
     if (!message.guildId || message.author.bot) return;
     const [guildSf, channelSf, messageSf, authorSf] = [
       BigInt(message.guildId),
@@ -496,7 +349,29 @@ client.once('ready', () => {
       } catch {}
     })();
     if (!incidentCategories) return;
-    await message.react('🚨');
+
+    //Check if they're currently punished
+    const punishment = await prisma.punishment.findFirst({
+      where: {
+        secondIncident: { guildSf, offenderSf: authorSf },
+        until: { gt: new Date() },
+      },
+      include: { secondIncident: true },
+    });
+
+    if (punishment) {
+      void message.delete();
+      IncidentLog(
+        punishment.secondIncident,
+        `**Deleted <@${authorSf}>'s message.** They are currently being punished.`,
+        message.content,
+      );
+      return;
+    }
+
+    try {
+      await message.react('🚨');
+    } catch {}
     const context = await prisma.message
       .findMany({ where: { guildSf, channelSf }, orderBy: { at: 'asc' } })
       .then(messages =>
@@ -522,98 +397,50 @@ client.once('ready', () => {
   });
 
   client.on('interactionCreate', async interaction => {
-    if (!interaction.guildId || !interaction.guild || !interaction.member)
+    if (
+      !interaction.guildId ||
+      !interaction.guild ||
+      !interaction.member ||
+      !interaction.isCommand()
+    ) {
       return;
-    if (interaction.isCommand()) {
-      if (interaction.commandName === 'audit-here') {
-        //Check the user has higher role than the bot
-        const me = await interaction.guild.members.fetchMe();
-        const them = await interaction.guild.members.fetch(interaction.user.id);
-        if (
-          !me.roles.highest ||
-          !them.roles.highest ||
-          them.roles.highest.position <= me.roles.highest.position
-        ) {
-          await interaction.reply({
-            content: 'You must have a higher role than me to use this command.',
-            ephemeral: true,
-          });
-          return;
-        }
-        const sf = BigInt(interaction.guildId);
-        const existing = await prisma.guild.findUnique({ where: { sf } });
-        const auditChannelSf = existing?.auditChannelSf
-          ? null
-          : BigInt(interaction.channelId);
-        await prisma.guild.upsert({
-          where: { sf },
-          create: { sf, auditChannelSf },
-          update: { auditChannelSf },
-        });
-        await interaction.reply({
-          content: auditChannelSf
-            ? 'This channel will now be used for auditing.'
-            : 'This channel is no longer being used for auditing.',
-          ephemeral: true,
-        });
-        return;
-      }
     }
-    if (!interaction.isButton() || !interaction.guildId) return;
-    await interaction.deferReply({ flags: 'Ephemeral' });
-    const [guildSf, userSf] = [
-      BigInt(interaction.guildId),
-      BigInt(interaction.user.id),
-    ];
-    const isPardon = interaction.customId.startsWith('pardon-');
-    const isProsecute = interaction.customId.startsWith('prosecute-');
-    const victimInterventionId = Number(interaction.customId.split('-')[1]!);
-    const victimIntervention = await prisma.victimIntervention.findFirst({
-      where: { id: victimInterventionId },
-      include: { incident: true },
+    if (interaction.commandName !== 'audit-here') return;
+    // interaction.guild.channels
+    //   .fetch('981171582691082240')
+    //   .then(x =>
+    //     x?.send('<@1371248865159942175> and <@1272273667283488881> shall duel to the death.'),
+    //   );
+    //Check the user has higher role than the bot
+    const me = await interaction.guild.members.fetchMe();
+    const them = await interaction.guild.members.fetch(interaction.user.id);
+    if (
+      !me.roles.highest ||
+      !them.roles.highest ||
+      them.roles.highest.position <= me.roles.highest.position
+    ) {
+      await interaction.reply({
+        content: 'You must have a higher role than me to use this command.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const sf = BigInt(interaction.guildId);
+    const existing = await prisma.guild.findUnique({ where: { sf } });
+    const auditChannelSf = existing?.auditChannelSf
+      ? null
+      : BigInt(interaction.channelId);
+    await prisma.guild.upsert({
+      where: { sf },
+      create: { sf, auditChannelSf },
+      update: { auditChannelSf },
     });
-    if (!victimIntervention) {
-      console.warn(`Victim intervention ${victimInterventionId} not found.`);
-      return;
-    }
-    if (victimIntervention.victimSf !== userSf) {
-      await interaction.editReply(
-        `You are not the victim of this incident - <@${victimIntervention.victimSf}> is.`,
-      );
-      return;
-    }
-    if (isPardon) {
-      await prisma.pardon.create({
-        data: {
-          incidentId: victimIntervention.incident.id,
-          interventionId: victimIntervention.id,
-        },
-      });
-      const hours = Math.floor(pardonMs / (60 * 60_000));
-      await interaction.editReply(`You have pardoned <@${victimInterventionId}>.
-For ${hours}h I will ignore incidents against you by them.`);
-      await interaction.message.delete();
-      IncidentLog(
-        victimIntervention.incident,
-        `**Victim <@${userSf}> pardoned offender <@${victimInterventionId}>.**`,
-      );
-    }
-    if (isProsecute) {
-      await prisma.probation.create({
-        data: {
-          originalIncidentId: victimIntervention.incident.id,
-          expiresAt: new Date(Date.now() + probationMs),
-        },
-      });
-      await interaction.editReply(
-        'Their behaviour will now be closely watched, thank you.',
-      );
-      await interaction.message.delete();
-      IncidentLog(
-        victimIntervention.incident,
-        `**Victim <@${userSf}> prosecuted offender <@${victimInterventionId}>.**`,
-      );
-    }
+    await interaction.reply({
+      content: auditChannelSf
+        ? 'This channel will now be used for auditing.'
+        : 'This channel is no longer being used for auditing.',
+      ephemeral: true,
+    });
   });
 });
 
