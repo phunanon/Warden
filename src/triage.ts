@@ -34,10 +34,10 @@ export const TriageIncident = async (
       .describe('A private message sent to the offender if they are punished.'),
     notification: z
       .string()
+      .regex(/^\[offender\]/)
       .nullable()
       .describe(
         `If punished the latest message will be deleted, so this is one sentence that will replace it in the chat so members know vaguely what was said and that it was removed.
-Use [offender] in place of their username, which will be replaced with their actual username. Ensure the user name is always mentioned in the notification.
 E.g. [offender] expressed hostility and wishes harm upon others, which has been removed.`,
       ),
   });

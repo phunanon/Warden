@@ -121,6 +121,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         );
     } catch {}
   })();
+  if (!message) return;
   if (result.kind === 'ignore') {
     IncidentLog(incident, '**Incident ignored.**', result.thoughts);
     await prisma.incident.update({
@@ -128,7 +129,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       data: { ignoredBecause: result.thoughts },
     });
     try {
-      await message?.reactions.resolve('🚨')?.remove();
+      await message.reactions.resolve('🚨')?.remove();
     } catch {}
   }
   if (result.kind === 'punish') {
@@ -140,7 +141,6 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
     );
 
     const messageStatus = (() => {
-      if (!message) return 'not found';
       if (notification) {
         const payload = {
           content:
@@ -158,7 +158,7 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
             void message.channel.send(payload);
           }
         } catch (err) {
-          console.error('Failed to paraphrase:', err);
+          console.error('Failed to notify chat', err);
         }
       }
       void message.delete();
@@ -171,27 +171,6 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
 
     if (await MatchPriorIncident(incident)) return;
 
-    try {
-      const guild = await client.guilds.fetch(`${incident.guildSf}`);
-      if (!guild) {
-        console.warn(`Guild ${incident.guildSf} not found.`);
-        return;
-      }
-      const offender = await guild.members.fetch(`${incident.offenderSf}`);
-      if (!offender) {
-        console.warn(`Offender ${incident.offenderSf} not found.`);
-        return;
-      }
-      await offender.timeout(
-        10_000,
-        `To read my DM about incident #${incident.id}`,
-      );
-    } catch (err) {
-      console.error(
-        `Failed to briefly timeout offender ${incident.offenderSf}:`,
-        err,
-      );
-    }
     const expiresAt = new Date(Date.now() + probationMs);
     await prisma.incident.update({
       where: { id: incident.id },
@@ -324,7 +303,7 @@ client.once('ready', () => {
             } catch {}
           })(message.reference.messageId)
         : undefined;
-    const unsanitised =
+    const content =
       truncate(
         message.content ||
           [...message.messageSnapshots].map(x => x[1].content).join('\n'),
@@ -332,9 +311,22 @@ client.once('ready', () => {
       ) +
       (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '') +
       message.attachments.map(a => `[Attachment: ${a.name}]`).join(' ');
-    const content = unsanitised.replace(/\\/g, '/');
+    const sanitisedContent = content.replaceAll(
+      /[\uD800-\uDBFF][\uDC00-\uDFFF]/g,
+      pair => {
+        const codePoint =
+          ((pair.charCodeAt(0) - 0xd800) << 10) +
+          (pair.charCodeAt(1) - 0xdc00) +
+          0x10000;
+        return `\\u{${codePoint.toString(16)}}`;
+      },
+    );
+
     await prisma.message.create({
-      data: { guildSf, channelSf, messageSf, authorSf, content },
+      data: {
+        ...{ guildSf, channelSf, messageSf, authorSf },
+        content: sanitisedContent,
+      },
     });
     await prisma.$queryRawTyped(deleteOldMessages());
     const incidentCategories = await (async () => {
@@ -358,10 +350,11 @@ client.once('ready', () => {
     });
 
     if (punishment) {
+      const untilSec = Math.floor(punishment.until.getTime() / 1000);
       void message.delete();
       IncidentLog(
         punishment.secondIncident,
-        `**Deleted <@${authorSf}>'s message.** They are currently being punished.`,
+        `**Deleted <@${authorSf}>'s message.** They are still being punished (expires <t:${untilSec}:R>).`,
         message.content,
       );
       return;
