@@ -4,7 +4,7 @@ dotenv.config();
 import { Incident, PrismaClient } from '@prisma/client';
 import { deleteOldMessages } from '@prisma/client/sql';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
-import { Client } from 'discord.js';
+import { Client, Message } from 'discord.js';
 import { DetectIncident } from './spotter';
 import * as Triage from './triage';
 import { IncidentLog } from './audit';
@@ -38,17 +38,25 @@ const truncate = (str: string, maxLength: number) =>
   str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
 
 async function FetchOffender(guildSf: bigint, offenderSf: bigint) {
-  const guild = await client.guilds.fetch(`${guildSf}`);
-  if (!guild) {
-    console.warn(`Guild ${guildSf} not found.`);
+  try {
+    const guild = await client.guilds.fetch(`${guildSf}`);
+    if (!guild) {
+      console.warn(`Guild ${guildSf} not found.`);
+      return null;
+    }
+    const offender = await guild.members.fetch(`${offenderSf}`);
+    if (!offender) {
+      console.warn(`Offender ${offenderSf} not found.`);
+      return null;
+    }
+    return offender;
+  } catch (err) {
+    console.error(
+      `Failed to fetch offender ${offenderSf} in guild ${guildSf}:`,
+      err,
+    );
     return null;
   }
-  const offender = await guild.members.fetch(`${offenderSf}`);
-  if (!offender) {
-    console.warn(`Offender ${offenderSf} not found.`);
-    return null;
-  }
-  return offender;
 }
 
 async function MatchPriorIncident(incident: Incident): Promise<boolean> {
@@ -74,9 +82,17 @@ async function MatchPriorIncident(incident: Incident): Promise<boolean> {
   });
 
   const offender = await FetchOffender(incident.guildSf, incident.offenderSf);
+  if (!offender) {
+    IncidentLog(
+      incident,
+      `**Failed to notify <@${incident.offenderSf}> of repeat incident.**`,
+    );
+    return true;
+  }
+  
   const t = Math.floor(until.getTime() / 1000);
   try {
-    await offender?.send({
+    await offender.send({
       embeds: [
         {
           title: `You misbehaved again!`,
@@ -188,15 +204,13 @@ async function ProcessIncidents(ctx: Ctx) {
       punishments: { none: {} },
     },
   });
-  if (unprocessed.length) {
-    console.log(
-      `Found unprocessed incidents: #${unprocessed.map(u => u.id).join(', #')}`,
-    );
-    for (const incident of unprocessed) {
-      await TriageIncident(ctx, incident);
-    }
-  } else {
-    console.log('No incidents to triage.');
+  if (!unprocessed.length) return;
+
+  console.log(
+    `Found unprocessed incidents: #${unprocessed.map(u => u.id).join(', #')}`,
+  );
+  for (const incident of unprocessed) {
+    await TriageIncident(ctx, incident);
   }
 }
 
@@ -205,10 +219,7 @@ async function ProcessProbations() {
     where: { startInformed: false },
     include: { originalIncident: true },
   });
-  if (!startUninformedProbations.length) {
-    console.log('No probations to process.');
-    return;
-  }
+  if (!startUninformedProbations.length) return;
   for (const probation of startUninformedProbations) {
     const { originalIncident: incident, caution } = probation;
     const t = Math.floor(probation.expiresAt.getTime() / 1000);
@@ -284,8 +295,7 @@ client.once('ready', () => {
     description: 'Log activity in this channel for auditing',
   });
 
-  client.on('messageCreate', async message => {
-    // if (message.guildId !== '965259347250782238') return;
+  async function HandleMessage(message: Message, OPENAI_API_KEY: string) {
     if (!message.guildId || message.author.bot) return;
     const [guildSf, channelSf, messageSf, authorSf] = [
       BigInt(message.guildId),
@@ -293,6 +303,7 @@ client.once('ready', () => {
       BigInt(message.id),
       BigInt(message.author.id),
     ];
+
     const repliedTo =
       !message.messageSnapshots.size && message.reference?.messageId
         ? await (async messageId => {
@@ -303,13 +314,15 @@ client.once('ready', () => {
             } catch {}
           })(message.reference.messageId)
         : undefined;
+    const truncatedContent = truncate(
+      message.content ||
+        [...message.messageSnapshots].map(x => x[1].content).join('\n'),
+      512,
+    );
     const content =
-      truncate(
-        message.content ||
-          [...message.messageSnapshots].map(x => x[1].content).join('\n'),
-        512,
-      ) +
+      truncatedContent +
       (repliedTo ? ` (in reply to "${truncate(repliedTo, 50)}")` : '') +
+      ' ' +
       message.attachments.map(a => `[Attachment: ${a.name}]`).join(' ');
     const sanitisedContent = content.replaceAll(
       /[\uD800-\uDBFF][\uDC00-\uDFFF]/g,
@@ -322,18 +335,35 @@ client.once('ready', () => {
       },
     );
 
-    await prisma.message.create({
-      data: {
-        ...{ guildSf, channelSf, messageSf, authorSf },
-        content: sanitisedContent,
-      },
-    });
+    try {
+      const existingMessage = await prisma.message.findUnique({
+        where: {
+          guildSf_channelSf_messageSf: { guildSf, channelSf, messageSf },
+        },
+      });
+      if (existingMessage) {
+        await prisma.message.update({
+          where: { id: existingMessage.id },
+          data: { content: sanitisedContent },
+        });
+      } else {
+        await prisma.message.create({
+          data: {
+            ...{ guildSf, channelSf, messageSf, authorSf },
+            content: sanitisedContent,
+          },
+        });
+      }
+    } catch (err) {
+      console.error('Failed to save message:', content, sanitisedContent, err);
+      return;
+    }
     await prisma.$queryRawTyped(deleteOldMessages());
     const incidentCategories = await (async () => {
       try {
         return await DetectIncident(
           OPENAI_API_KEY,
-          content,
+          truncatedContent,
           message.attachments,
         );
       } catch {}
@@ -385,6 +415,13 @@ client.once('ready', () => {
       content,
     );
     await DutyCycle(ctx)();
+  }
+
+  client.on('messageUpdate', async (_, newMessage) => {
+    await HandleMessage(newMessage, OPENAI_API_KEY);
+  });
+  client.on('messageCreate', async message => {
+    await HandleMessage(message, OPENAI_API_KEY);
   });
 
   client.on('interactionCreate', async interaction => {

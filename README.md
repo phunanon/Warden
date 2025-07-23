@@ -11,10 +11,9 @@ The goal is to keep a server clean even in the event of all moderators being abs
     - each message in breach of rules are deleted
 - **probation**
   - the member is privately informed that their behaviour is in breach of a specific rule, and there will be *punishment* if they break another rule in the next half hour
-  - they are informed and thanked if their probation ends without another incident
   - messages in breach of the rule will be deleted as necessary
 - **punishment**:
-  - all their suspicious messages are automatically deleted without further AI evaluation
+  - for an hour, all their suspicious messages are automatically deleted without further AI evaluation
 
 ## Hosting
 

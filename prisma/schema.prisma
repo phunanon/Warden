@@ -23,6 +23,8 @@ model Message {
   messageSf BigInt
   authorSf  BigInt
   content   String
+
+  @@unique([guildSf, channelSf, messageSf])
 }
 
 model Incident {
