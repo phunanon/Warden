@@ -297,6 +297,10 @@ client.once('ready', () => {
 
   async function HandleMessage(message: Message, OPENAI_API_KEY: string) {
     if (!message.guildId || message.author.bot) return;
+    //Check the message is not more than one day old
+    const oneDayAgo = Date.now() - 1000 * 60 * 60 * 24;
+    if (message.createdAt.getTime() < oneDayAgo) return;
+
     const [guildSf, channelSf, messageSf, authorSf] = [
       BigInt(message.guildId),
       BigInt(message.channelId),
