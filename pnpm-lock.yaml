@@ -18,8 +18,8 @@ importers:
         specifier: ^16.5.0
         version: 16.5.0
       openai:
-        specifier: ^6.0.0
-        version: 6.0.0(ws@8.18.2)(zod@3.25.51)
+        specifier: ^6.2.0
+        version: 6.2.0(ws@8.18.2)(zod@3.25.51)
       zod:
         specifier: ^3.25.51
         version: 3.25.51
@@ -137,8 +137,8 @@ packages:
   magic-bytes.js@1.12.1:
     resolution: {integrity: sha512-ThQLOhN86ZkJ7qemtVRGYM+gRgR8GEXNli9H/PMvpnZsE44Xfh3wx9kGJaldg314v85m+bFW6WBMaVHJc/c3zA==}
 
-  openai@6.0.0:
-    resolution: {integrity: sha512-J7LEmTn3WLZnbyEmMYcMPyT5A0fGzhPwSvVUcNRKy6j2hJIbqSFrJERnUHYNkcoCCalRumypnj9AVoe5bVHd3Q==}
+  openai@6.2.0:
+    resolution: {integrity: sha512-qqjzHls7F5xkXNGy9P1Ei1rorI5LWupUUFWP66zPU8FlZbiITX8SFcHMKNZg/NATJ0LpIZcMUFxSwQmdeQPwSw==}
     hasBin: true
     peerDependencies:
       ws: ^8.18.0
@@ -317,7 +317,7 @@ snapshots:
 
   magic-bytes.js@1.12.1: {}
 
-  openai@6.0.0(ws@8.18.2)(zod@3.25.51):
+  openai@6.2.0(ws@8.18.2)(zod@3.25.51):
     optionalDependencies:
       ws: 8.18.2
       zod: 3.25.51

@@ -4,7 +4,6 @@ import { ChatCompletionCreateParamsNonStreaming } from 'openai/resources';
 import z, { ZodType } from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
 
-const model = 'gpt-5-nano';
 const preamble = `You are a Discord moderator called Warden, able to see the latest messages between Discord users in a channel.
 There are both adults and minors in the chat, therefore there should be no sexual language.
 We uphold the right to free speech and the right to express yourself, but also the right to not be harassed or bullied.
@@ -63,7 +62,7 @@ ${incident.msgContent}`;
     });
     const settings: Settings = {
       response_format: zodResponseFormat(schema, 'response'),
-      model,
+      model: 'gpt-5-nano',
       reasoning_effort: 'minimal',
       messages: [
         {
@@ -103,7 +102,8 @@ E.g. [offender] expressed hostility and wishes harm upon others, which has been 
 
   const settings: Settings = {
     response_format: zodResponseFormat(schema, 'response'),
-    model,
+    model: 'gpt-5-nano',
+    reasoning_effort: 'minimal',
     messages: [
       {
         role: 'system',
