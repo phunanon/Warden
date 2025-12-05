@@ -90,14 +90,14 @@ Be aware of bad spelling due to text speech.`,
     caution: z
       .string()
       .nullable()
-      .describe('A private message sent to the offender if they are punished.'),
+      .describe('A private message sent to the offender if they are punished. E.g. Your message has been removed because [reasons]'),
     notification: z
       .string()
       .regex(/^\[offender\]/)
       .nullable()
       .describe(
         `If punished the latest message will be deleted, so this is one sentence that will replace it in the chat so members know vaguely what was said and that it was removed.
-E.g. [offender] expressed hostility and wishes harm upon others, which has been removed.`,
+E.g. I removed [offender]'s message as it expressed hostility toward others.`,
       ),
   });
 
