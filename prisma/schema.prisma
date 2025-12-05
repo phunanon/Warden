@@ -13,6 +13,7 @@ model Guild {
   createdAt      DateTime @default(now())
   sf             BigInt   @unique
   auditChannelSf BigInt?
+  alertChannelSf BigInt?
 }
 
 model Message {

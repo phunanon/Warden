@@ -2,7 +2,7 @@ import assert from 'assert';
 import * as dotenv from 'dotenv';
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
-import { Client, Message } from 'discord.js';
+import { Client, Message, CommandInteraction } from 'discord.js';
 dotenv.config();
 import { Incident, PrismaClient } from './generated/client';
 import { deleteOldMessages } from './generated/sql';
@@ -76,7 +76,12 @@ async function MatchPriorIncident(incident: Incident): Promise<boolean> {
   if (!probation) return false;
 
   const prior = probation.originalIncident;
-  IncidentLog(incident, `**Incident is a repeat of #${prior.id}.**`);
+  IncidentLog(
+    incident,
+    `:warning: **Incident is a repeat of #${prior.id}.**`,
+    undefined,
+    incident.offenderSf,
+  );
   const until = new Date(Date.now() + punishmentMs);
   await prisma.incident.update({
     where: { id: incident.id },
@@ -158,33 +163,31 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
       thoughts,
     );
 
-    const messageStatus = (() => {
-      if (notification) {
-        const payload = {
-          content:
-            '_' +
-            notification.replace(/\[offender\]/g, `<@${incident.offenderSf}>`) +
-            '_',
-          allowedMentions: { parse: [] },
-        };
-        try {
-          if (message.reference && !message.messageSnapshots.size) {
-            void message
-              .fetchReference()
-              .then(reference => reference.reply(payload));
-          } else if ('send' in message.channel) {
-            void message.channel.send(payload);
-          }
-        } catch (err) {
-          console.error('Failed to notify chat', err);
+    if (notification) {
+      const payload = {
+        content:
+          '_' +
+          notification.replace(/\[offender\]/g, `<@${incident.offenderSf}>`) +
+          '_',
+        allowedMentions: { parse: [] },
+      };
+      try {
+        if (message.reference && !message.messageSnapshots.size) {
+          void message
+            .fetchReference()
+            .then(reference => reference.reply(payload));
+        } else if ('send' in message.channel) {
+          void message.channel.send(payload);
         }
+      } catch (err) {
+        console.error('Failed to notify chat', err);
       }
-      void message.delete();
-      return 'deleted';
-    })();
+    }
+    void message.delete();
+
     IncidentLog(
       incident,
-      `https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf} ${messageStatus} `,
+      `https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf} deleted.`,
     );
 
     if (await MatchPriorIncident(incident)) return;
@@ -295,6 +298,11 @@ client.once('ready', () => {
   void client.application?.commands.create({
     name: 'audit-here',
     description: 'Log activity in this channel for auditing',
+  });
+  void client.application?.commands.create({
+    name: 'alerts-here',
+    description:
+      'Send probation alerts in this channel (only if auditing is enabled)',
   });
 
   async function HandleMessage(message: Message, OPENAI_API_KEY: string) {
@@ -430,19 +438,36 @@ client.once('ready', () => {
     await HandleMessage(message, OPENAI_API_KEY);
   });
 
+  const handleChannelHere = async (
+    interaction: CommandInteraction,
+    guildId: string,
+    kind: 'auditChannelSf' | 'alertChannelSf',
+  ) => {
+    const sf = BigInt(guildId);
+    const existing = await prisma.guild.findUnique({ where: { sf } });
+    const channelSf = existing?.[kind] ? null : BigInt(interaction.channelId);
+    await prisma.guild.upsert({
+      where: { sf },
+      create: { sf, [kind]: channelSf },
+      update: { [kind]: channelSf },
+    });
+    const forWhat = kind === 'auditChannelSf' ? 'auditing' : 'alerts';
+    await interaction.reply({
+      content: channelSf
+        ? `This channel will now be used for ${forWhat}.`
+        : `This channel is no longer being used for ${forWhat}.`,
+      ephemeral: true,
+    });
+  };
+
   client.on('interactionCreate', async interaction => {
-    if (
-      !interaction.guildId ||
-      !interaction.guild ||
-      !interaction.member ||
-      !interaction.isCommand()
-    ) {
+    if (!interaction.guild || !interaction.member || !interaction.isCommand())
       return;
-    }
-    if (interaction.commandName !== 'audit-here') return;
+    const { guild } = interaction;
+
     //Check the user has higher role than the bot
-    const me = await interaction.guild.members.fetchMe();
-    const them = await interaction.guild.members.fetch(interaction.user.id);
+    const me = await guild.members.fetchMe();
+    const them = await guild.members.fetch(interaction.user.id);
     if (
       !me.roles.highest ||
       !them.roles.highest ||
@@ -454,22 +479,11 @@ client.once('ready', () => {
       });
       return;
     }
-    const sf = BigInt(interaction.guildId);
-    const existing = await prisma.guild.findUnique({ where: { sf } });
-    const auditChannelSf = existing?.auditChannelSf
-      ? null
-      : BigInt(interaction.channelId);
-    await prisma.guild.upsert({
-      where: { sf },
-      create: { sf, auditChannelSf },
-      update: { auditChannelSf },
-    });
-    await interaction.reply({
-      content: auditChannelSf
-        ? 'This channel will now be used for auditing.'
-        : 'This channel is no longer being used for auditing.',
-      ephemeral: true,
-    });
+
+    if (interaction.commandName === 'audit-here')
+      await handleChannelHere(interaction, guild.id, 'auditChannelSf');
+    if (interaction.commandName === 'alerts-here')
+      await handleChannelHere(interaction, guild.id, 'alertChannelSf');
   });
 });
 
