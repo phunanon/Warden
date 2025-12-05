@@ -1,8 +1,8 @@
-import { Incident } from '@prisma/client';
 import OpenAI from 'openai';
 import { ChatCompletionCreateParamsNonStreaming } from 'openai/resources';
 import z, { ZodType } from 'zod';
 import { zodResponseFormat } from 'openai/helpers/zod';
+import { Incident } from './generated/client';
 
 const preamble = `You are a Discord moderator called Warden, able to see the latest messages between Discord users in a channel.
 There are both adults and minors in the chat, therefore there should be no sexual language.
@@ -64,6 +64,7 @@ ${incident.msgContent}`;
       response_format: zodResponseFormat(schema, 'response'),
       model: 'gpt-5-nano',
       reasoning_effort: 'minimal',
+      verbosity: 'low',
       messages: [
         {
           role: 'system',
@@ -104,6 +105,7 @@ E.g. [offender] expressed hostility and wishes harm upon others, which has been 
     response_format: zodResponseFormat(schema, 'response'),
     model: 'gpt-5-nano',
     reasoning_effort: 'minimal',
+    verbosity: 'low',
     messages: [
       {
         role: 'system',
@@ -111,7 +113,7 @@ E.g. [offender] expressed hostility and wishes harm upon others, which has been 
 
 A dumb automatic system has flagged the latest message by ${offenderSf} for these reasons: ${categories}
 
-Play devil's advocate and, in a few sentences or fewer, explain if the latest message by ${offenderSf}, in context, is actually alright.`,
+Play devil's advocate and explain if the latest message by ${offenderSf}, in context, is actually alright.`,
       },
       { role: 'user', content: context },
     ],

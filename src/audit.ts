@@ -1,4 +1,4 @@
-import { Incident } from '@prisma/client';
+import { Incident } from './generated/client';
 import { client, prisma } from '.';
 
 const flushMs = 10_000;

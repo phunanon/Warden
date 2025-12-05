@@ -1,6 +1,7 @@
 node_modules/
 out/
 .env
+src/generated/
 prisma/*
 !prisma/schema.prisma
 !prisma/sql/

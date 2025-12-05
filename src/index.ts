@@ -1,10 +1,11 @@
 import assert from 'assert';
 import * as dotenv from 'dotenv';
-dotenv.config();
-import { Incident, PrismaClient } from '@prisma/client';
-import { deleteOldMessages } from '@prisma/client/sql';
+import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3';
 import { GatewayIntentBits, IntentsBitField, Partials } from 'discord.js';
 import { Client, Message } from 'discord.js';
+dotenv.config();
+import { Incident, PrismaClient } from './generated/client';
+import { deleteOldMessages } from './generated/sql';
 import { DetectIncident } from './spotter';
 import * as Triage from './triage';
 import { IncidentLog } from './audit';
@@ -21,7 +22,8 @@ const punishmentHours = 1;
 const punishmentMs = punishmentHours * 60 * 60_000;
 let dutyCycleTimer: NodeJS.Timeout | undefined;
 
-export const prisma = new PrismaClient();
+const adapter = new PrismaBetterSqlite3({ url: 'file:./prisma/db.db' });
+export const prisma = new PrismaClient({ adapter });
 
 export const client = new Client({
   intents: [
@@ -89,7 +91,7 @@ async function MatchPriorIncident(incident: Incident): Promise<boolean> {
     );
     return true;
   }
-  
+
   const t = Math.floor(until.getTime() / 1000);
   try {
     await offender.send({

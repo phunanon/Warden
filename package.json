@@ -11,14 +11,15 @@
   "author": "Patrick Bowen",
   "license": "MIT",
   "dependencies": {
-    "@prisma/client": "6.9.0",
+    "@prisma/adapter-better-sqlite3": "^7.0.1",
+    "@prisma/client": "7.0.1",
     "discord.js": "^14.19.3",
     "dotenv": "^16.5.0",
     "openai": "^6.2.0",
     "zod": "^3.25.51"
   },
   "devDependencies": {
-    "prisma": "^6.9.0"
+    "prisma": "^7.0.1"
   },
   "packageManager": "pnpm@10.6.1+sha512.40ee09af407fa9fbb5fbfb8e1cb40fbb74c0af0c3e10e9224d7b53c7658528615b2c92450e74cfad91e3a2dcafe3ce4050d80bda71d757756d2ce2b66213e9a3",
   "pnpm": {
