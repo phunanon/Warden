@@ -8,7 +8,7 @@ import { Incident, PrismaClient } from './generated/client';
 import { deleteOldMessages } from './generated/sql';
 import { DetectIncident } from './spotter';
 import * as Triage from './triage';
-import { IncidentLog } from './audit';
+import { i, IncidentLog } from './audit';
 
 //TODO: implement special bouncer routine which evaluates all new member's messages
 
@@ -78,7 +78,7 @@ async function MatchPriorIncident(incident: Incident): Promise<boolean> {
   const prior = probation.originalIncident;
   IncidentLog(
     incident,
-    `:warning: **Incident is a repeat of #${prior.id}.**`,
+    `:warning: **Incident is a repeat of ${i(prior)}.**`,
     undefined,
     incident.offenderSf,
   );
@@ -103,18 +103,17 @@ async function MatchPriorIncident(incident: Incident): Promise<boolean> {
       embeds: [
         {
           title: `You misbehaved again!`,
-          description:
-            'I told you if you if you broke the same rule again this would happen.',
           fields: [
             { name: 'You sent', value: `> ${incident.msgContent}` },
             {
               name: 'What happens now',
-              value: `Any suspicious messages will be automatically deleted`,
+              value: `Instant deletion of suspicious messages`,
+              inline: true,
             },
-            { name: 'When this will stop happening', value: `<t:${t}:R>` },
+            { name: 'When this will stop', value: `<t:${t}:R>`, inline: true },
           ],
           color: 0xff0000,
-          footer: { text: `Incident #${incident.id}` },
+          footer: { text: `Incident ${i(incident)}` },
         },
       ],
     });
@@ -211,9 +210,7 @@ async function ProcessIncidents(ctx: Ctx) {
   });
   if (!unprocessed.length) return;
 
-  console.log(
-    `Found unprocessed incidents: #${unprocessed.map(u => u.id).join(', #')}`,
-  );
+  console.log(`Found unprocessed incidents: ${unprocessed.map(i).join(', ')}`);
   for (const incident of unprocessed) {
     await TriageIncident(ctx, incident);
   }
@@ -244,14 +241,16 @@ async function ProcessProbations() {
               { name: 'You sent', value: `> ${incident.msgContent}` },
               {
                 name: 'If you misbehave again',
-                value: `Any even slightly suspicious messages will be automatically deleted for ${punishmentHours}h.`,
+                value: `Instant deletion of suspicious messages for ${punishmentHours}h.`,
+                inline: true,
               },
               {
-                name: 'If you do not misbehave',
+                name: 'If you behave',
                 value: `You will be forgiven <t:${t}:R>.`,
+                inline: true,
               },
             ],
-            footer: { text: `Incident #${incident.id}` },
+            footer: { text: `Incident ${i(incident)}` },
           },
         ],
       });
@@ -398,7 +397,7 @@ client.once('ready', () => {
       void message.delete();
       IncidentLog(
         punishment.secondIncident,
-        `**Deleted <@${authorSf}>'s message.** They are still being punished (expires <t:${untilSec}:R>).`,
+        `🗑️ ${message.url} by <@${authorSf}> as punishment until <t:${untilSec}:R>.`,
         message.content,
       );
       return;

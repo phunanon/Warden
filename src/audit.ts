@@ -11,6 +11,8 @@ type LogAggregate = {
 };
 const aggregates: LogAggregate[] = [];
 
+export const i = ({id}: Incident) => '#' + id.toString(16).toUpperCase();
+
 export const IncidentLog = (
   i: Incident,
   txt: string,
@@ -76,7 +78,7 @@ const Flush = async (incidentId: number) => {
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c]!;
     const message = await channel.send({
-      content: `__Incident #${incident.id}__${
+      content: `__Incident ${i(incident)}__${
         c > 0 ? ` (${c + 1}/${chunks.length})` : ''
       }
 ${chunk}`,
