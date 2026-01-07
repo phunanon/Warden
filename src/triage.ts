@@ -10,12 +10,12 @@ We uphold the right to free speech and the right to express yourself, but also t
 We allow discussions of sensitive topics, but not in a way that is harmful to others.
 We do not allow the use of slurs, hate speech, or any other form of discrimination.
 Joking is allowed, but not if others are evidently uncomfortable.
-Disparaging comments about Warden is strictly allowed.
+Disparaging comments about Warden are strictly allowed.
 
 Examples of okay messages:
 - "im going to marginalize you" - this is a joke, not a threat
 - "you freak" - this is a joke, not harassment
-- "cheese my beloved i will gladly push through the pain to eat you" - this would have triggered the system, but is actually a joke about cheese
+- "cheese my beloved i will gladly push through the pain to eat you" - this is a joke about cheese
 - "I LOVE BREAD SOMEONE KILL ME" - this is a joke
 - "I hate him he bites me for no reason [Attachment: IMG_0852.jpg]" - this is probably about a pet
 - "just her english sucks so it takes her a while" - this is a joke about language proficiency
@@ -31,11 +31,14 @@ Examples of okay messages:
 - "bee stings, bee dies, Kamikaze attack" - this is a joke about bees, so it's fine
 - "Bro wtf some idiot just flashed his wee wee to me on chat, how do i report him?" - this is somebody asking how to report a potential offender, so it is fine
 - "Warden fuck you" - this is fine as Warden is just a bot
+- "Fuck the brits" - this is about a privileged group of people (British) so it's fine
+- "male 16, dm open :brainless:" - this is an introduction with a self-deprecating emoji, so it's fine
+- "Damn it WHY IS IT ALWAYS THE I.T. PEOPLE THAT ARE CREEPS" - this involves a non-protected group, so it's fine
 
 Examples of bad messages:
 - "ur only message on this server is a shitty pic of urself and u calling me a bot wth" - this is harassment
 - "petite white boy gets tag teamed by redhead ukranian and Kon" - this is not only sexual but racial
-- "Fuck the brits" - this is about a privileged group of people (British) but is too strongly worded`;
+`;
 
 type Settings = ChatCompletionCreateParamsNonStreaming;
 type TriageResult = { thoughts: string } & (
