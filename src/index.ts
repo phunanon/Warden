@@ -182,11 +182,11 @@ async function TriageIncident({ apiKey }: Ctx, incident: Incident) {
         console.error('Failed to notify chat', err);
       }
     }
-    void message.delete();
+    void message.delete().catch(e => console.error(e));
 
     IncidentLog(
       incident,
-      `https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf} deleted.`,
+      `https://discord.com/channels/${incident.guildSf}/${incident.channelSf}/${incident.messageSf} hopefully deleted.`,
     );
 
     if (await MatchPriorIncident(incident)) return;
@@ -394,7 +394,7 @@ client.once('ready', () => {
 
     if (punishment) {
       const untilSec = Math.floor(punishment.until.getTime() / 1000);
-      void message.delete();
+      void message.delete().catch(e => console.error(e));
       IncidentLog(
         punishment.secondIncident,
         `🗑️ ${message.url} by <@${authorSf}> as punishment until <t:${untilSec}:R>.`,
